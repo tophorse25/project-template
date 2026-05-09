@@ -1,0 +1,26 @@
+[YYYY-MM-DD] Type: short description (under 50 chars)
+
+## Progress
+- <what you accomplished today>
+
+## Problems
+- [Tag] <describe the blocker> | None
+
+## Insights
+- [Tag] <pattern, tip, or discovery worth sharing> | None
+
+## Plan
+- <what you will work on next>
+
+# --- Convention Guide ---
+# Type:  Feat | Fix | Learn | Doc | Chore | Refactor | Test
+# Tags:  Auth | API | Database | CORS | Middleware | Validation
+#         React | State | CSS | Routing | Form | Performance
+#         Build | Deploy | Docker | CI | Env
+#         Git | Testing | Debug | Architecture | Security
+#
+# Always prefix Problems and Insights with a [Tag] so they
+# can be aggregated into the team knowledge base.
+#
+# Use "Resolves: [Tag] description" in the body to close a
+# previously-reported problem.
