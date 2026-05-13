@@ -8,5 +8,5 @@ build/
 .idea/
 __pycache__/
 *.pyc
-.env
+.venv/
 data/raw/
