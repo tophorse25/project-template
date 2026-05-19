@@ -1,26 +1,26 @@
-# Project: [Project Name]
+# Project: Reddit Research Collector
 
-> One-line description of what you're building.
+> A small Python workflow for collecting Reddit posts and comments for product research.
 
 ## Description
 
-Replace this with a 2-3 sentence description of your project.
+This project gathers Reddit discussion data around product pain points and recommendations. It includes a Playwright browser workflow for quick search-result capture and a PRAW-based API collector for richer post/comment records when Reddit credentials are available.
 
 ## Stage
 
-Phase 0: Setup & Planning
+Phase 1: Data Collection Prototype
 
 ## Progress Snapshot
 
 | Module | Status | Progress | Notes |
 |--------|--------|----------|-------|
-| Project Setup | In Progress | 0% | Initial configuration |
-| [Module 2] | Not Started | 0% | - |
-| [Module 3] | Not Started | 0% | - |
-| [Module 4] | Not Started | 0% | - |
+| Project Setup | Done | 100% | Repo, virtualenv, tracking files, and git workflow are in place |
+| Browser Search Collector | In Progress | 60% | Playwright search flow saves visible Reddit post links |
+| Reddit API Collector | In Progress | 50% | PRAW collector saves posts and comments from target subreddits |
+| Data Review Workflow | Not Started | 0% | Needs cleaning, tagging, and analysis steps |
 
-**Status values**: Not Started → In Progress → Done | **Progress**: percentage or rough estimate
+**Status values**: Not Started -> In Progress -> Done | **Progress**: percentage or rough estimate
 
 ## Last Sync
 
-[YYYY-MM-DD]
+2026-05-19

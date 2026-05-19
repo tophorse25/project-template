@@ -2,16 +2,31 @@
 
 ## Stats
 
-Total: 1 | Done: 0 | Pending: 1
+Total: 5 | Done: 3 | Pending: 2
 
 ## Tasks
 
-### [In Progress] Set up project environment
-- 负责人：[your name]
-- 截止：[YYYY-MM-DD]
-- 依赖：None
+### [Done] Set up project environment
+- Owner: project team
+- Due: 2026-05-13
+- Dependencies: None
 
-### [Pending] Add more tasks as you plan your work
-- 负责人：[your name]
-- 截止：[YYYY-MM-DD]
-- 依赖：Project setup complete
+### [Done] Add initial Reddit collection workflows
+- Owner: project team
+- Due: 2026-05-13
+- Dependencies: Project setup complete
+
+### [Done] Make browser search workflow reusable from the command line
+- Owner: project team
+- Due: 2026-05-19
+- Dependencies: Browser workflow prototype
+
+### [In Progress] Add validation and tests for saved JSONL records
+- Owner: project team
+- Due: TBD
+- Dependencies: Stable record schema
+
+### [Pending] Build a first-pass analysis workflow for product pain points
+- Owner: project team
+- Due: TBD
+- Dependencies: Collected Reddit dataset

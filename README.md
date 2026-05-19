@@ -1,40 +1,56 @@
-# Internship Project
+# Reddit Research Collector
 
-This repository uses the **project-butler** workflow for structured internship tracking.
+This project collects Reddit search results for early product-research workflows. It currently supports two paths:
 
-## Quick Start
+- `src/main_reddit_browser.py`: opens Reddit search in Playwright and saves visible post links.
+- `src/main_reddit.py`: uses the Reddit API through PRAW to collect posts and comments from specific subreddits.
+
+The current sample topic is cold brew coffee makers, but the browser workflow can run any query from the command line.
+
+## Setup
 
 ```bash
-# 1. Set up your project
-# 2. Start a session — create log/session-YYYY-MM-DD.md
-# 3. Work and commit using the template: git commit
-# 4. End session — update session-handoff.md
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+playwright install chromium
 ```
 
-## Commit Convention
+For the API collector, copy `.env.example` to `.env` and fill in Reddit API credentials.
 
-Run `git commit` — your editor opens with the template pre-filled.
+## Browser Search
 
-```
-[YYYY-MM-DD] Type: short description
-
-## Progress
-- <what you accomplished>
-
-## Problems
-- [Tag] <description> | None
-
-## Insights
-- [Tag] <discovery> | None
-
-## Plan
-- <next steps>
+```bash
+.\.venv\Scripts\python.exe src\main_reddit_browser.py --query "cold brew coffee maker" --limit 20
 ```
 
-## Types
+Useful options:
 
-Feat | Fix | Learn | Doc | Chore | Refactor | Test
+```bash
+.\.venv\Scripts\python.exe src\main_reddit_browser.py --query "coffee maker leaking" --sort new --headless --output data/raw/leaking_posts.jsonl
+```
 
-## Directory Structure
+Outputs are written as JSONL under `data/raw/`, which is ignored by git.
 
-See [STRUCTURE.md](STRUCTURE.md) for details.
+## API Collector
+
+```bash
+.\.venv\Scripts\python.exe src\main_reddit.py
+```
+
+This path searches the configured subreddits and saves post/comment records to `data/raw/reddit_cold_brew_sample.jsonl`.
+
+## Tests
+
+```bash
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+## Project Workflow
+
+The repo also uses the project-butler tracking files:
+
+- `PROJECT.md` for stage and module progress.
+- `TODO.md` for next work items.
+- `session-handoff.md` for continuity between sessions.
+- `UPDATE_LOG.md` for milestone notes.
