@@ -46,6 +46,16 @@ This path searches the configured subreddits and saves post/comment records to `
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
+## Merchant Report
+
+Generate a first-pass product demand report from collected Reddit JSONL:
+
+```bash
+.\.venv\Scripts\python.exe src\main_report.py --input data\raw\reddit_browser_posts.jsonl --product "cold brew coffee maker" --output reports\cold-brew-coffee-maker.md
+```
+
+The report summarizes demand signals, pain points, location clues, and evidence links. The current analyzer is rule-based so the workflow stays testable before adding an LLM or agent layer.
+
 ## Project Workflow
 
 The repo also uses the project-butler tracking files:

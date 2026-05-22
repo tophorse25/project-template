@@ -2,7 +2,7 @@
 
 ## Stats
 
-Total: 5 | Done: 3 | Pending: 2
+Total: 6 | Done: 4 | Pending: 2
 
 ## Tasks
 
@@ -26,7 +26,12 @@ Total: 5 | Done: 3 | Pending: 2
 - Due: TBD
 - Dependencies: Stable record schema
 
-### [Pending] Build a first-pass analysis workflow for product pain points
+### [Done] Build a first-pass analysis workflow for product pain points
+- Owner: project team
+- Due: 2026-05-22
+- Dependencies: Collected Reddit dataset
+
+### [Pending] Improve location detection for merchant demand mapping
 - Owner: project team
 - Due: TBD
-- Dependencies: Collected Reddit dataset
+- Dependencies: More Reddit records with subreddit, title, body, and comment context
