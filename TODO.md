@@ -2,7 +2,7 @@
 
 ## Stats
 
-Total: 6 | Done: 4 | Pending: 2
+Total: 8 | Done: 5 | Pending: 3
 
 ## Tasks
 
@@ -31,7 +31,22 @@ Total: 6 | Done: 4 | Pending: 2
 - Due: 2026-05-22
 - Dependencies: Collected Reddit dataset
 
+### [Done] Add adjustable crawl configuration
+- Owner: project team
+- Due: 2026-05-26
+- Dependencies: Browser workflow prototype
+
 ### [Pending] Improve location detection for merchant demand mapping
 - Owner: project team
 - Due: TBD
 - Dependencies: More Reddit records with subreddit, title, body, and comment context
+
+### [Pending] Add logged-in browser session support for small-batch crawling
+- Owner: project team
+- Due: TBD
+- Dependencies: Browser profile/session strategy
+
+### [Pending] Compare with mentor's super_crawler reference
+- Owner: project team
+- Due: TBD
+- Dependencies: Access to ShuhangGe/super_crawler repository or local copy

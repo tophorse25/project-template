@@ -16,3 +16,10 @@
 - Added Markdown report generation for merchant-facing product research.
 - Generated the first sample report for cold brew coffee makers.
 
+## 2026-05-26: Adjustable Crawl Jobs and Stronger Demand Report
+
+- Added JSON config support for adjustable Reddit product research jobs.
+- Updated the browser collector to run multi-query jobs from config.
+- Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
+- Recorded `super_crawler` as a mentor reference pending repository access.
+

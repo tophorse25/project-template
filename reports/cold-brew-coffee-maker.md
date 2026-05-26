@@ -3,10 +3,17 @@
 ## Summary
 
 - Total Reddit records reviewed: 14
+- Unique evidence URLs: 14
 - Estimated demand strength: Medium
+- Demand signal coverage: 6 records (43%)
+- Location clue coverage: 1 records (7%)
+
+## Demand Volume Evidence
+
 - Records with demand signals: 6
 - Records with pain points: 3
-- Records with location clues: 1
+- Total Reddit score observed: 0
+- Total Reddit comments observed: 0
 
 ## Demand Signals
 
@@ -20,11 +27,16 @@
 
 - India: 1
 
+## Location Coverage Note
+
+- Location coverage is weak. Increase crawl size and include comment/body text before making region decisions.
+
 ## Merchant Takeaway
 
 - Main demand signal: `purchase_intent`.
 - Product positioning opportunity: address `taste_or_performance` in product selection or listing copy.
 - Region to investigate first: `India`.
+- Inventory stance: demand is visible, but start with a small validation batch.
 - Treat this as directional evidence, not an inventory forecast, until the crawl size is increased.
 
 ## Evidence

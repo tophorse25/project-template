@@ -6,7 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
-from analysis.report import generate_markdown_report, normalize_reddit_record
+from analysis.report import demand_metrics, generate_markdown_report, normalize_reddit_record
 from analysis.signals import detect_demand_signals, detect_location_clues, detect_pain_points
 from main_report import parse_args
 
@@ -73,16 +73,49 @@ class ReportWorkflowTests(unittest.TestCase):
         report = generate_markdown_report(records, product="cold brew maker", evidence_limit=1)
 
         self.assertIn("# Product Demand Report: cold brew maker", report)
+        self.assertIn("## Demand Volume Evidence", report)
         self.assertIn("## Demand Signals", report)
         self.assertIn("## Location Clues", report)
+        self.assertIn("## Location Coverage Note", report)
         self.assertIn("## Merchant Takeaway", report)
         self.assertIn("Canada", report)
+
+    def test_demand_metrics_calculates_signal_and_location_rates(self) -> None:
+        records = [
+            {
+                "url": "https://example.com/1",
+                "score": 10,
+                "comment_count": 3,
+                "demand_signals": ["purchase_intent"],
+                "pain_points": [],
+                "location_clues": ["Canada"],
+            },
+            {
+                "url": "https://example.com/2",
+                "score": 5,
+                "comment_count": 1,
+                "demand_signals": [],
+                "pain_points": ["leaking"],
+                "location_clues": [],
+            },
+        ]
+
+        metrics = demand_metrics(records)
+
+        self.assertEqual(metrics["total_records"], 2)
+        self.assertEqual(metrics["unique_urls"], 2)
+        self.assertEqual(metrics["records_with_signals"], 1)
+        self.assertEqual(metrics["records_with_locations"], 1)
+        self.assertEqual(metrics["total_score"], 15)
+        self.assertEqual(metrics["total_comments"], 4)
 
     def test_parse_args_accepts_report_options(self) -> None:
         args = parse_args(
             [
                 "--input",
                 "data/raw/reddit.jsonl",
+                "--config",
+                "configs/cold_brew_reddit.json",
                 "--product",
                 "cold brew maker",
                 "--output",
@@ -93,6 +126,7 @@ class ReportWorkflowTests(unittest.TestCase):
         )
 
         self.assertEqual(args.input, "data/raw/reddit.jsonl")
+        self.assertEqual(args.config, "configs/cold_brew_reddit.json")
         self.assertEqual(args.product, "cold brew maker")
         self.assertEqual(args.output, "reports/cold-brew-maker.md")
         self.assertEqual(args.evidence_limit, 3)

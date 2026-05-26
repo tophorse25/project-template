@@ -10,6 +10,7 @@ sys.path.insert(0, str(SRC_PATH))
 
 from main_reddit_browser import parse_args
 from storage.json_writer import write_jsonl
+from workflows.job_config import load_reddit_crawl_job
 from workflows.reddit_search import build_reddit_search_url
 
 
@@ -39,6 +40,8 @@ class RedditWorkflowTests(unittest.TestCase):
     def test_parse_args_accepts_browser_workflow_options(self) -> None:
         args = parse_args(
             [
+                "--config",
+                "configs/cold_brew_reddit.json",
                 "--query",
                 "cold brew filter",
                 "--sort",
@@ -57,6 +60,7 @@ class RedditWorkflowTests(unittest.TestCase):
             ]
         )
 
+        self.assertEqual(args.config, "configs/cold_brew_reddit.json")
         self.assertEqual(args.query, "cold brew filter")
         self.assertEqual(args.sort, "top")
         self.assertEqual(args.limit, 5)
@@ -65,6 +69,14 @@ class RedditWorkflowTests(unittest.TestCase):
         self.assertTrue(args.headless)
         self.assertEqual(args.slow_mo_ms, 0)
         self.assertEqual(args.wait_ms, 100)
+
+    def test_load_reddit_crawl_job_reads_adjustable_config(self) -> None:
+        job = load_reddit_crawl_job("configs/cold_brew_reddit.json")
+
+        self.assertEqual(job.product, "cold brew coffee maker")
+        self.assertIn("best cold brew maker", job.queries)
+        self.assertEqual(job.limit_per_query, 20)
+        self.assertEqual(job.output_path, "data/raw/cold_brew_reddit_browser.jsonl")
 
 
 if __name__ == "__main__":

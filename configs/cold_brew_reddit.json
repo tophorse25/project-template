@@ -1,0 +1,13 @@
+{
+  "product": "cold brew coffee maker",
+  "queries": [
+    "cold brew coffee maker",
+    "best cold brew maker",
+    "cold brew maker leaking",
+    "cold brew maker hard to clean"
+  ],
+  "sort": "relevance",
+  "limit_per_query": 20,
+  "output_path": "data/raw/cold_brew_reddit_browser.jsonl",
+  "report_path": "reports/cold-brew-coffee-maker.md"
+}

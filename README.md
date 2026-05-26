@@ -30,6 +30,12 @@ Useful options:
 .\.venv\Scripts\python.exe src\main_reddit_browser.py --query "coffee maker leaking" --sort new --headless --output data/raw/leaking_posts.jsonl
 ```
 
+Adjustable multi-query crawl jobs can be stored in `configs/`:
+
+```bash
+.\.venv\Scripts\python.exe src\main_reddit_browser.py --config configs\cold_brew_reddit.json --headless
+```
+
 Outputs are written as JSONL under `data/raw/`, which is ignored by git.
 
 ## API Collector
@@ -54,7 +60,13 @@ Generate a first-pass product demand report from collected Reddit JSONL:
 .\.venv\Scripts\python.exe src\main_report.py --input data\raw\reddit_browser_posts.jsonl --product "cold brew coffee maker" --output reports\cold-brew-coffee-maker.md
 ```
 
-The report summarizes demand signals, pain points, location clues, and evidence links. The current analyzer is rule-based so the workflow stays testable before adding an LLM or agent layer.
+Using the same crawl config:
+
+```bash
+.\.venv\Scripts\python.exe src\main_report.py --config configs\cold_brew_reddit.json --input data\raw\reddit_browser_posts.jsonl
+```
+
+The report summarizes demand volume evidence, demand signals, pain points, location clues, inventory stance, and evidence links. The current analyzer is rule-based so the workflow stays testable before adding an LLM or agent layer.
 
 ## Project Workflow
 

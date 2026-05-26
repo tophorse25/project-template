@@ -15,12 +15,12 @@ Phase 1: Data Collection Prototype
 | Module | Status | Progress | Notes |
 |--------|--------|----------|-------|
 | Project Setup | Done | 100% | Repo, virtualenv, tracking files, and git workflow are in place |
-| Browser Search Collector | In Progress | 60% | Playwright search flow saves visible Reddit post links |
+| Browser Search Collector | In Progress | 70% | Playwright search flow supports adjustable multi-query JSON configs |
 | Reddit API Collector | In Progress | 50% | PRAW collector saves posts and comments from target subreddits |
-| Data Review Workflow | In Progress | 35% | Rule-based report generation summarizes demand, pain points, locations, and evidence |
+| Data Review Workflow | In Progress | 45% | Report now separates demand volume evidence, location coverage, pain points, and inventory stance |
 
 **Status values**: Not Started -> In Progress -> Done | **Progress**: percentage or rough estimate
 
 ## Last Sync
 
-2026-05-22
+2026-05-26

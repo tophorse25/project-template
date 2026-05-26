@@ -85,14 +85,40 @@ def demand_strength(records: list[dict[str, Any]]) -> str:
     if not records:
         return "No data"
 
-    signal_count = sum(len(record.get("demand_signals", [])) for record in records)
-    ratio = signal_count / len(records)
+    records_with_signals = sum(1 for record in records if record.get("demand_signals"))
+    ratio = records_with_signals / len(records)
 
-    if ratio >= 1.0:
+    if ratio >= 0.65:
         return "High"
-    if ratio >= 0.4:
+    if ratio >= 0.25:
         return "Medium"
     return "Low"
+
+
+def demand_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    total_records = len(records)
+    unique_urls = {record["url"] for record in records if record.get("url")}
+    records_with_signals = sum(1 for record in records if record.get("demand_signals"))
+    records_with_pain = sum(1 for record in records if record.get("pain_points"))
+    records_with_locations = sum(1 for record in records if record.get("location_clues"))
+    total_score = sum(int(record.get("score") or 0) for record in records)
+    total_comments = sum(int(record.get("comment_count") or 0) for record in records)
+
+    return {
+        "total_records": total_records,
+        "unique_urls": len(unique_urls),
+        "records_with_signals": records_with_signals,
+        "records_with_pain": records_with_pain,
+        "records_with_locations": records_with_locations,
+        "signal_rate": records_with_signals / total_records if total_records else 0,
+        "location_rate": records_with_locations / total_records if total_records else 0,
+        "total_score": total_score,
+        "total_comments": total_comments,
+    }
+
+
+def format_percent(value: float) -> str:
+    return f"{value * 100:.0f}%"
 
 
 def format_counter(counter: Counter[str]) -> str:
@@ -110,6 +136,7 @@ def generate_markdown_report(
     demand_counter = count_labels(normalized_records, "demand_signals")
     pain_counter = count_labels(normalized_records, "pain_points")
     location_counter = count_labels(normalized_records, "location_clues")
+    metrics = demand_metrics(normalized_records)
     evidence = top_records(normalized_records, limit=evidence_limit)
 
     lines = [
@@ -117,11 +144,18 @@ def generate_markdown_report(
         "",
         "## Summary",
         "",
-        f"- Total Reddit records reviewed: {len(normalized_records)}",
+        f"- Total Reddit records reviewed: {metrics['total_records']}",
+        f"- Unique evidence URLs: {metrics['unique_urls']}",
         f"- Estimated demand strength: {demand_strength(normalized_records)}",
-        f"- Records with demand signals: {sum(1 for record in normalized_records if record['demand_signals'])}",
-        f"- Records with pain points: {sum(1 for record in normalized_records if record['pain_points'])}",
-        f"- Records with location clues: {sum(1 for record in normalized_records if record['location_clues'])}",
+        f"- Demand signal coverage: {metrics['records_with_signals']} records ({format_percent(metrics['signal_rate'])})",
+        f"- Location clue coverage: {metrics['records_with_locations']} records ({format_percent(metrics['location_rate'])})",
+        "",
+        "## Demand Volume Evidence",
+        "",
+        f"- Records with demand signals: {metrics['records_with_signals']}",
+        f"- Records with pain points: {metrics['records_with_pain']}",
+        f"- Total Reddit score observed: {metrics['total_score']}",
+        f"- Total Reddit comments observed: {metrics['total_comments']}",
         "",
         "## Demand Signals",
         "",
@@ -135,9 +169,13 @@ def generate_markdown_report(
         "",
         format_counter(location_counter),
         "",
+        "## Location Coverage Note",
+        "",
+        location_coverage_note(metrics),
+        "",
         "## Merchant Takeaway",
         "",
-        merchant_takeaway(demand_counter, pain_counter, location_counter),
+        merchant_takeaway(demand_counter, pain_counter, location_counter, metrics),
         "",
         "## Evidence",
         "",
@@ -165,6 +203,7 @@ def merchant_takeaway(
     demand_counter: Counter[str],
     pain_counter: Counter[str],
     location_counter: Counter[str],
+    metrics: dict[str, Any],
 ) -> str:
     if not demand_counter:
         return "Current sample has weak demand evidence. Collect more records before making stocking decisions."
@@ -186,9 +225,26 @@ def merchant_takeaway(
     else:
         takeaway.append("- Location demand is unclear. Future collection should prioritize comments/posts with region clues.")
 
+    if metrics["signal_rate"] >= 0.65:
+        takeaway.append("- Inventory stance: demand looks strong enough to justify deeper market validation.")
+    elif metrics["signal_rate"] >= 0.25:
+        takeaway.append("- Inventory stance: demand is visible, but start with a small validation batch.")
+    else:
+        takeaway.append("- Inventory stance: do not stock heavily until more demand evidence is collected.")
+
     takeaway.append("- Treat this as directional evidence, not an inventory forecast, until the crawl size is increased.")
 
     return "\n".join(takeaway)
+
+
+def location_coverage_note(metrics: dict[str, Any]) -> str:
+    if not metrics["total_records"]:
+        return "- No records were available for location analysis."
+
+    if metrics["location_rate"] >= 0.3:
+        return "- Location coverage is usable for a first directional region read."
+
+    return "- Location coverage is weak. Increase crawl size and include comment/body text before making region decisions."
 
 
 def write_report(markdown: str, output_path: str) -> None:
