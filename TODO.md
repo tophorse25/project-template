@@ -2,7 +2,7 @@
 
 ## Stats
 
-Total: 8 | Done: 5 | Pending: 3
+Total: 10 | Done: 7 | Pending: 3
 
 ## Tasks
 
@@ -50,3 +50,13 @@ Total: 8 | Done: 5 | Pending: 3
 - Owner: project team
 - Due: TBD
 - Dependencies: Access to ShuhangGe/super_crawler repository or local copy
+
+### [Done] Add durable research memory
+- Owner: project team
+- Due: 2026-05-26
+- Dependencies: Mentor feedback on context window management
+
+### [Done] Add crawl run error logging
+- Owner: project team
+- Due: 2026-05-26
+- Dependencies: Config-driven browser crawl

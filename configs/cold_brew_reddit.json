@@ -9,5 +9,6 @@
   "sort": "relevance",
   "limit_per_query": 20,
   "output_path": "data/raw/cold_brew_reddit_browser.jsonl",
-  "report_path": "reports/cold-brew-coffee-maker.md"
+  "report_path": "reports/cold-brew-coffee-maker.md",
+  "run_log_path": "log/crawl-runs/cold_brew_reddit.json"
 }

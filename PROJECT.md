@@ -18,6 +18,7 @@ Phase 1: Data Collection Prototype
 | Browser Search Collector | In Progress | 70% | Playwright search flow supports adjustable multi-query JSON configs |
 | Reddit API Collector | In Progress | 50% | PRAW collector saves posts and comments from target subreddits |
 | Data Review Workflow | In Progress | 45% | Report now separates demand volume evidence, location coverage, pain points, and inventory stance |
+| Agent Runtime Foundations | In Progress | 20% | Durable research memory and per-query crawl error logs are in place |
 
 **Status values**: Not Started -> In Progress -> Done | **Progress**: percentage or rough estimate
 

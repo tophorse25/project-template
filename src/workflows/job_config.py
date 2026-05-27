@@ -14,6 +14,7 @@ class RedditCrawlJob:
     limit_per_query: int = 20
     output_path: str = "data/raw/reddit_browser_posts.jsonl"
     report_path: str = "reports/reddit-product-report.md"
+    run_log_path: str | None = None
 
 
 def load_reddit_crawl_job(config_path: str) -> RedditCrawlJob:
@@ -37,4 +38,5 @@ def load_reddit_crawl_job(config_path: str) -> RedditCrawlJob:
         limit_per_query=int(data.get("limit_per_query", 20)),
         output_path=str(data.get("output_path", "data/raw/reddit_browser_posts.jsonl")),
         report_path=str(data.get("report_path", "reports/reddit-product-report.md")),
+        run_log_path=str(data["run_log_path"]) if data.get("run_log_path") else None,
     )

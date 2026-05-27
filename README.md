@@ -36,6 +36,8 @@ Adjustable multi-query crawl jobs can be stored in `configs/`:
 .\.venv\Scripts\python.exe src\main_reddit_browser.py --config configs\cold_brew_reddit.json --headless
 ```
 
+Each config-driven crawl writes a JSON run log under `log/crawl-runs/`. Failed queries are recorded and skipped so the rest of the crawl can finish. Use `--fail-fast` when debugging if you want the first query failure to stop the run.
+
 Outputs are written as JSONL under `data/raw/`, which is ignored by git.
 
 ## API Collector
@@ -67,6 +69,10 @@ Using the same crawl config:
 ```
 
 The report summarizes demand volume evidence, demand signals, pain points, location clues, inventory stance, and evidence links. The current analyzer is rule-based so the workflow stays testable before adding an LLM or agent layer.
+
+## Agent Memory
+
+Durable research lessons are stored in `memory/research_learnings.md`. Use this file for facts that should survive context-window compression, such as useful query patterns, false positives, report rules, and architecture decisions.
 
 ## Project Workflow
 

@@ -1,0 +1,28 @@
+{
+  "product": "cold brew coffee maker",
+  "queries": [
+    "cold brew coffee maker",
+    "best cold brew maker",
+    "cold brew maker recommendations",
+    "cold brew maker worth it",
+    "buy cold brew maker",
+    "cold brew maker for home",
+    "cold brew maker leaking",
+    "cold brew maker hard to clean",
+    "cold brew maker mold",
+    "cold brew maker filter sediment",
+    "cold brew maker expensive",
+    "cold brew maker broke",
+    "cold brew maker USA",
+    "cold brew maker Canada",
+    "cold brew maker UK",
+    "cold brew maker Europe",
+    "cold brew maker India",
+    "cold brew maker Australia"
+  ],
+  "sort": "relevance",
+  "limit_per_query": 25,
+  "output_path": "data/raw/cold_brew_reddit_broad_browser.jsonl",
+  "report_path": "reports/cold-brew-coffee-maker-broad.md",
+  "run_log_path": "log/crawl-runs/cold_brew_reddit_broad.json"
+}

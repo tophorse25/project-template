@@ -6,7 +6,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
 sys.path.insert(0, str(SRC_PATH))
 
-from analysis.report import demand_metrics, generate_markdown_report, normalize_reddit_record
+from analysis.report import demand_metrics, generate_markdown_report, normalize_reddit_record, top_records
 from analysis.signals import detect_demand_signals, detect_location_clues, detect_pain_points
 from main_report import parse_args
 
@@ -108,6 +108,38 @@ class ReportWorkflowTests(unittest.TestCase):
         self.assertEqual(metrics["records_with_locations"], 1)
         self.assertEqual(metrics["total_score"], 15)
         self.assertEqual(metrics["total_comments"], 4)
+
+    def test_top_records_deduplicates_evidence_urls(self) -> None:
+        records = [
+            {
+                "title": "First",
+                "url": "https://example.com/repeated",
+                "score": 1,
+                "comment_count": 1,
+                "demand_signals": ["purchase_intent"],
+                "pain_points": [],
+            },
+            {
+                "title": "Duplicate",
+                "url": "https://example.com/repeated",
+                "score": 1,
+                "comment_count": 1,
+                "demand_signals": ["purchase_intent"],
+                "pain_points": [],
+            },
+            {
+                "title": "Second",
+                "url": "https://example.com/second",
+                "score": 1,
+                "comment_count": 1,
+                "demand_signals": [],
+                "pain_points": [],
+            },
+        ]
+
+        selected = top_records(records, limit=3)
+
+        self.assertEqual([record["url"] for record in selected], ["https://example.com/repeated", "https://example.com/second"])
 
     def test_parse_args_accepts_report_options(self) -> None:
         args = parse_args(

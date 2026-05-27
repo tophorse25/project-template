@@ -10,3 +10,4 @@ __pycache__/
 *.pyc
 .venv/
 data/raw/
+_reference_super_crawler/

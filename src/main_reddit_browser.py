@@ -4,6 +4,13 @@ from collections.abc import Sequence
 from browser.session import BrowserSession
 from extractors.reddit_extractor import extract_visible_reddit_posts
 from storage.json_writer import write_jsonl
+from workflows.crawl_log import (
+    CrawlRunLog,
+    QueryRunResult,
+    default_crawl_log_path,
+    utc_now,
+    write_crawl_log,
+)
 from workflows.job_config import RedditCrawlJob, load_reddit_crawl_job
 from workflows.reddit_search import build_reddit_search_url
 
@@ -60,6 +67,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=5_000,
         help="Additional wait time after page load before extraction.",
     )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop the crawl on the first query failure.",
+    )
     return parser.parse_args(argv)
 
 
@@ -94,40 +106,86 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     job = job_from_args(args)
     all_posts = []
+    query_results: list[QueryRunResult] = []
+    crawl_started_at = utc_now()
 
     with BrowserSession(headless=args.headless, slow_mo_ms=args.slow_mo_ms) as session:
         for query_index, query in enumerate(job.queries):
+            query_started_at = utc_now()
             search_url = build_reddit_search_url(query=query, sort=job.sort)
             print(f"Searching Reddit for: {query}")
-            session.goto(search_url)
-            print(f"Page title: {session.title()}")
 
-            if session.page is None:
-                raise RuntimeError("Browser page was not initialized.")
+            try:
+                session.goto(search_url)
+                print(f"Page title: {session.title()}")
 
-            session.page.wait_for_timeout(args.wait_ms)
+                if session.page is None:
+                    raise RuntimeError("Browser page was not initialized.")
 
-            screenshot_path = screenshot_path_for_query(
-                base_path=args.screenshot,
-                query_index=query_index,
-                total_queries=len(job.queries),
-            )
-            if screenshot_path:
-                session.screenshot(screenshot_path)
+                session.page.wait_for_timeout(args.wait_ms)
 
-            posts = extract_visible_reddit_posts(
-                page=session.page,
-                query=query,
-                limit=job.limit_per_query,
-            )
-            all_posts.extend(posts)
+                screenshot_path = screenshot_path_for_query(
+                    base_path=args.screenshot,
+                    query_index=query_index,
+                    total_queries=len(job.queries),
+                )
+                if screenshot_path:
+                    session.screenshot(screenshot_path)
+
+                posts = extract_visible_reddit_posts(
+                    page=session.page,
+                    query=query,
+                    limit=job.limit_per_query,
+                )
+                all_posts.extend(posts)
+                query_results.append(
+                    QueryRunResult(
+                        query=query,
+                        status="success",
+                        records_collected=len(posts),
+                        started_at=query_started_at,
+                        completed_at=utc_now(),
+                    )
+                )
+            except Exception as exc:
+                error_message = f"{type(exc).__name__}: {exc}"
+                print(f"Query failed: {query} | {error_message}")
+                query_results.append(
+                    QueryRunResult(
+                        query=query,
+                        status="failed",
+                        records_collected=0,
+                        started_at=query_started_at,
+                        completed_at=utc_now(),
+                        error=error_message,
+                    )
+                )
+                if args.fail_fast:
+                    raise
 
     write_jsonl(
         records=all_posts,
         output_path=job.output_path,
     )
 
+    crawl_completed_at = utc_now()
+    successful_queries = sum(1 for result in query_results if result.status == "success")
+    run_log = CrawlRunLog(
+        product=job.product,
+        output_path=job.output_path,
+        total_queries=len(job.queries),
+        successful_queries=successful_queries,
+        failed_queries=len(job.queries) - successful_queries,
+        total_records=len(all_posts),
+        started_at=crawl_started_at,
+        completed_at=crawl_completed_at,
+        query_results=query_results,
+    )
+    run_log_path = job.run_log_path or default_crawl_log_path(job.output_path, crawl_completed_at)
+    write_crawl_log(run_log, run_log_path)
+
     print(f"Saved {len(all_posts)} Reddit post records to {job.output_path}.")
+    print(f"Saved crawl run log to {run_log_path}.")
 
 
 if __name__ == "__main__":

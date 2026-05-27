@@ -69,7 +69,7 @@ def count_labels(records: list[dict[str, Any]], field: str) -> Counter[str]:
 
 
 def top_records(records: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
-    return sorted(
+    sorted_records = sorted(
         records,
         key=lambda record: (
             len(record.get("demand_signals", [])),
@@ -78,7 +78,22 @@ def top_records(records: list[dict[str, Any]], limit: int = 10) -> list[dict[str
             int(record.get("comment_count") or 0),
         ),
         reverse=True,
-    )[:limit]
+    )
+
+    selected: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    for record in sorted_records:
+        url = record.get("url", "")
+        if url and url in seen_urls:
+            continue
+        if url:
+            seen_urls.add(url)
+        selected.append(record)
+        if len(selected) >= limit:
+            break
+
+    return selected
 
 
 def demand_strength(records: list[dict[str, Any]]) -> str:

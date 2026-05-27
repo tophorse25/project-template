@@ -14,6 +14,8 @@
 - `src/analysis/` normalizes Reddit records and detects simple demand, pain point, and location signals.
 - `configs/cold_brew_reddit.json` defines an adjustable product research crawl job.
 - `src/main_reddit_browser.py` can run multi-query browser collection from a config file.
+- `memory/research_learnings.md` stores durable lessons that should survive context-window compression.
+- Browser crawls now write structured run logs and continue after individual query failures.
 - `reports/cold-brew-coffee-maker.md` is the first sample demand report.
 - Project tracking docs now describe the actual Reddit research collector instead of the starter template.
 
@@ -23,6 +25,7 @@
 - Run a larger adjustable crawl to improve confidence in demand and region signals.
 - Improve location detection with better region dictionaries and comment/body context.
 - Add logged-in browser session support for small batch collection.
+- Wrap the existing collector/report code into explicit SearchAgent and DeepAnalysisAgent classes.
 - Add an LLM-assisted analysis layer after the rule-based report format stabilizes.
 
 ## Decisions Made
@@ -32,6 +35,7 @@
 - Store raw outputs under `data/raw/`, which remains ignored by git.
 - Build the report layer with deterministic rules first so agent/LLM output can be compared against a stable baseline.
 - Treat mentor's `super_crawler` as a reference implementation once repository access is available.
+- Keep durable findings in `memory/research_learnings.md` instead of relying on chat history.
 
 ## Blockers
 

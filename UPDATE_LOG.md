@@ -23,3 +23,10 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-05-26: Agent Memory and Crawl Error Handling
+
+- Added durable research memory for context-window management.
+- Added structured crawl run logs with per-query success and failure metadata.
+- Updated browser crawling so failed queries can be logged and skipped without stopping the full job.
+- Added `--fail-fast` for debugging query failures.
+
