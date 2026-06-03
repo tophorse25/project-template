@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from analysis.signals import (
+    category_label,
     detect_demand_signals,
     detect_location_clues,
     detect_pain_points,
@@ -266,3 +267,151 @@ def write_report(markdown: str, output_path: str) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")
+
+
+# --------------------------------------------------------------------------------------
+# Knowledge-base report rendering (themes accumulated across runs, confidence-aware).
+# These renderers are pure: they take plain theme/evidence objects, not the KB itself,
+# so the analysis layer stays decoupled from storage.
+# --------------------------------------------------------------------------------------
+
+
+def evidence_labels(evidence: Any) -> list[str]:
+    """Human labels for the non-negated signals attached to one evidence item."""
+
+    seen: list[str] = []
+    for match in getattr(evidence, "matched_signals", None) or []:
+        if match.get("negated"):
+            continue
+        label = category_label(f"{match.get('group')}:{match.get('label')}")
+        if label not in seen:
+            seen.append(label)
+    return seen
+
+
+def _evidence_title(evidence: Any) -> str:
+    title = (evidence.title or "").strip()
+    if title:
+        return title
+    body = (evidence.body or "").strip()
+    return (body[:100] + "…") if len(body) > 100 else (body or "Untitled evidence")
+
+
+def _top_evidence(evidence: list[Any], limit: int) -> list[Any]:
+    return sorted(evidence, key=lambda e: (e.score or 0) + (e.comment_count or 0), reverse=True)[:limit]
+
+
+def _scores(theme: Any) -> dict[str, Any]:
+    return theme.current_scores or {}
+
+
+def render_markdown_report(
+    product: str,
+    themes: list[Any],
+    evidence_by_theme: dict[str, list[Any]],
+    latest_run_by_theme: dict[str, Any] | None = None,
+    pipeline_runs: list[Any] | None = None,
+    taxonomy_version: str = "",
+    generated_at: str = "",
+    detail_limit: int = 8,
+    evidence_per_theme: int = 4,
+) -> str:
+    latest_run_by_theme = latest_run_by_theme or {}
+    pipeline_runs = pipeline_runs or []
+    ranked = sorted(themes, key=lambda t: _scores(t).get("adjusted_score", 0), reverse=True)
+    total_evidence = len({e.evidence_id for evs in evidence_by_theme.values() for e in evs})
+
+    lines = [
+        f"# Product Demand Report: {product}",
+        "",
+        f"_Deterministic engine · taxonomy {taxonomy_version} · generated {generated_at}_",
+        "",
+        "## Summary",
+        "",
+        f"- Demand themes tracked: {len(ranked)}",
+        f"- Unique evidence items (accumulated across runs): {total_evidence}",
+        f"- Pipeline cycles recorded: {len(pipeline_runs)}",
+    ]
+    if ranked:
+        top = ranked[0]
+        top_scores = _scores(top)
+        lines.append(
+            f"- Strongest theme: **{top.canonical_label}** "
+            f"(adjusted {top_scores.get('adjusted_score', 0)}, {top.sufficiency} evidence)"
+        )
+    lines.append(
+        "- Reading note: *adjusted score* is the cautious, confidence-weighted read; "
+        "*strength* is the optimistic ceiling if evidence were sufficient. Thin themes are "
+        "never auto-validated."
+    )
+    lines += ["", "## Demand Themes", ""]
+
+    if not ranked:
+        lines.append("_No themes yet. Ingest evidence and run a cycle._")
+    else:
+        lines.append("| Theme | Status | Evidence | Adjusted | Strength | Confidence | Sufficiency | Top region |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for theme in ranked:
+            scores = _scores(theme)
+            top_region = theme.geo_distribution[0]["region"] if theme.geo_distribution else "—"
+            lines.append(
+                f"| {theme.canonical_label} | {theme.status} | {theme.evidence_count} "
+                f"| {scores.get('adjusted_score', 0)} | {scores.get('signal_strength', 0)} "
+                f"| {scores.get('confidence', 0)} | {theme.sufficiency} | {top_region} |"
+            )
+
+    lines += ["", "## Theme Detail", ""]
+    for theme in ranked[:detail_limit]:
+        scores = _scores(theme)
+        lines.append(f"### {theme.canonical_label}")
+        lines.append("")
+        lines.append(
+            f"- Status: **{theme.status}** · sufficiency: **{theme.sufficiency}** · "
+            f"adjusted {scores.get('adjusted_score', 0)} / strength {scores.get('signal_strength', 0)} "
+            f"· confidence {scores.get('confidence', 0)}"
+        )
+        lines.append(f"- Evidence: {theme.evidence_count} across {theme.subreddit_count} subreddit(s)")
+        if theme.latest_recommendation:
+            lines.append(f"- Recommendation: {theme.latest_recommendation}")
+        if theme.demand_breakdown:
+            lines.append(f"- Demand signals: {theme.demand_breakdown}")
+        if theme.pain_breakdown:
+            lines.append(f"- Pain points: {theme.pain_breakdown}")
+        if theme.geo_distribution:
+            geo = ", ".join(
+                f"{row['region']} ({row['confidence']}, n={row['evidence_count']})"
+                for row in theme.geo_distribution
+            )
+            lines.append(f"- Geography: {geo}")
+
+        run = latest_run_by_theme.get(theme.theme_id)
+        if run is not None:
+            findings = run.findings or {}
+            if findings.get("why_real"):
+                lines.append(f"- Why it may be real: {findings['why_real']}")
+            if findings.get("why_noise"):
+                lines.append(f"- Why it may be noise: {', '.join(findings['why_noise'])}")
+            if findings.get("existing_solutions"):
+                lines.append(f"- Existing solutions mentioned: {', '.join(findings['existing_solutions'])}")
+            if findings.get("willingness_to_pay_signals"):
+                lines.append(f"- Willingness-to-pay language: {', '.join(findings['willingness_to_pay_signals'])}")
+
+        evidence = _top_evidence(evidence_by_theme.get(theme.theme_id, []), evidence_per_theme)
+        if evidence:
+            lines.append("- Evidence:")
+            for item in evidence:
+                labels = ", ".join(evidence_labels(item)) or "no labels"
+                lines.append(f"    - [{_evidence_title(item)}]({item.url}) — r/{item.subreddit} — {labels}")
+        lines.append("")
+
+    lines += [
+        "## Methodology & Limitations",
+        "",
+        "- Fully deterministic: rules + heuristics, no LLM, reproducible.",
+        "- Confidence-aware: every score is damped by evidence count and subreddit spread; "
+        "a theme seen once is never reported as validated.",
+        "- Accumulative: evidence is keyed by canonical URL and compounds across runs.",
+        "- Reddit is a demand *signal*, not a market-size measurement; geography is inferred.",
+        "",
+    ]
+    return "\n".join(lines)

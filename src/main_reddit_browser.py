@@ -3,6 +3,7 @@ from collections.abc import Sequence
 
 from browser.session import BrowserSession
 from extractors.reddit_extractor import extract_visible_reddit_posts
+from extractors.reddit_post_extractor import deep_fetch_records
 from storage.json_writer import write_jsonl
 from workflows.crawl_log import (
     CrawlRunLog,
@@ -72,6 +73,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Stop the crawl on the first query failure.",
     )
+    parser.add_argument(
+        "--deep-fetch",
+        action="store_true",
+        help="Visit top posts to capture body text and top comments.",
+    )
+    parser.add_argument(
+        "--deep-fetch-limit",
+        type=int,
+        default=10,
+        help="Maximum posts to deep-fetch per query.",
+    )
     return parser.parse_args(argv)
 
 
@@ -85,6 +97,8 @@ def job_from_args(args: argparse.Namespace) -> RedditCrawlJob:
         sort=args.sort,
         limit_per_query=args.limit,
         output_path=args.output,
+        deep_fetch=args.deep_fetch,
+        deep_fetch_limit=args.deep_fetch_limit,
     )
 
 
@@ -137,6 +151,13 @@ def main(argv: Sequence[str] | None = None) -> None:
                     query=query,
                     limit=job.limit_per_query,
                 )
+                if job.deep_fetch:
+                    comment_records = deep_fetch_records(
+                        session=session,
+                        post_records=posts,
+                        limit=job.deep_fetch_limit,
+                    )
+                    posts.extend(comment_records)
                 all_posts.extend(posts)
                 query_results.append(
                     QueryRunResult(

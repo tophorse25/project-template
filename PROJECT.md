@@ -1,27 +1,35 @@
-# Project: Reddit Research Collector
+# Project: Demand Intelligence Engine (Reddit)
 
-> A small Python workflow for collecting Reddit posts and comments for product research.
+> A deterministic, accumulating product-demand intelligence engine for e-commerce sellers.
 
 ## Description
 
-This project gathers Reddit discussion data around product pain points and recommendations. It includes a Playwright browser workflow for quick search-result capture and a PRAW-based API collector for richer post/comment records when Reddit credentials are available.
+This project gathers Reddit discussion around a product and turns it into a confidence-aware demand
+report. Collection (Playwright browser + PRAW API) feeds a multi-agent pipeline backed by a SQLite
+knowledge base that accumulates evidence across runs, dedupes it into canonical demand themes, scores
+them honestly (thin data is never over-claimed), runs deterministic deep research, and renders
+Markdown + static HTML. It closes the gap with — and surpasses — the mentor's `super_crawler`
+reference on data, analysis, memory, and auditability (see `docs/ARCHITECTURE.md`).
 
 ## Stage
 
-Phase 1: Data Collection Prototype
+Phase 2: Demand Intelligence Engine (multi-agent, accumulating memory)
 
 ## Progress Snapshot
 
 | Module | Status | Progress | Notes |
 |--------|--------|----------|-------|
 | Project Setup | Done | 100% | Repo, virtualenv, tracking files, and git workflow are in place |
-| Browser Search Collector | In Progress | 70% | Playwright search flow supports adjustable multi-query JSON configs |
+| Browser Search Collector | In Progress | 70% | Playwright multi-query JSON configs; rich-field enrichment pending (Phase D) |
 | Reddit API Collector | In Progress | 50% | PRAW collector saves posts and comments from target subreddits |
-| Data Review Workflow | In Progress | 45% | Report now separates demand volume evidence, location coverage, pain points, and inventory stance |
-| Agent Runtime Foundations | In Progress | 20% | Durable research memory and per-query crawl error logs are in place |
+| Persistence / Memory (KB) | Done | 100% | SQLite knowledge base; evidence accumulates across runs via stable ids + score history |
+| Analysis Core | Done | 95% | Word-boundary + negation-aware signals, geo distribution, confidence-aware scoring |
+| Agent Pipeline | Done | 90% | Discovery, pool manager, deep research, change detection, report agent + runner |
+| Reporting | Done | 90% | KB-based Markdown + self-contained static HTML with provenance |
+| Collection Enrichment | Not Started | 0% | Rich search-card fields + deep-fetch of post body/comments (Phase D) |
 
 **Status values**: Not Started -> In Progress -> Done | **Progress**: percentage or rough estimate
 
 ## Last Sync
 
-2026-05-26
+2026-06-02

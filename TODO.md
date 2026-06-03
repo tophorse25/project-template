@@ -2,7 +2,7 @@
 
 ## Stats
 
-Total: 10 | Done: 7 | Pending: 3
+Total: 13 | Done: 9 | Pending: 4
 
 ## Tasks
 
@@ -36,20 +36,38 @@ Total: 10 | Done: 7 | Pending: 3
 - Due: 2026-05-26
 - Dependencies: Browser workflow prototype
 
-### [Pending] Improve location detection for merchant demand mapping
+### [Done] Improve location detection for merchant demand mapping
 - Owner: project team
-- Due: TBD
+- Due: 2026-06-02
 - Dependencies: More Reddit records with subreddit, title, body, and comment context
+- Note: `analysis/geo.py` — subreddit→region map (strongest signal) + currency + spelling, confidence-weighted distribution
 
 ### [Pending] Add logged-in browser session support for small-batch crawling
 - Owner: project team
 - Due: TBD
 - Dependencies: Browser profile/session strategy
 
-### [Pending] Compare with mentor's super_crawler reference
+### [Done] Compare with mentor's super_crawler reference
+- Owner: project team
+- Due: 2026-06-02
+- Dependencies: Local copy of super_crawler
+- Note: Local copy studied; gap closed and surpassed on data/analysis/memory/auditability. See docs/ARCHITECTURE.md.
+
+### [Done] Build accumulating multi-agent demand intelligence engine
+- Owner: project team
+- Due: 2026-06-02
+- Dependencies: super_crawler comparison
+- Note: SQLite KB, hardened analysis, agent pipeline, confidence-aware scoring, Markdown + static HTML
+
+### [Pending] Enrich browser collection (rich card fields + deep-fetch of post body/comments)
 - Owner: project team
 - Due: TBD
-- Dependencies: Access to ShuhangGe/super_crawler repository or local copy
+- Dependencies: Live browser/network access; defensive DOM extraction (Phase D)
+
+### [Pending] Final analysis hardening pass
+- Owner: project team
+- Due: TBD
+- Dependencies: Engine in place; expand taxonomy + subreddit→region map, deepen negation/weights, edge-case tests
 
 ### [Done] Add durable research memory
 - Owner: project team

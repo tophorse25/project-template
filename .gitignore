@@ -10,4 +10,6 @@ __pycache__/
 *.pyc
 .venv/
 data/raw/
+data/*.sqlite3
+data/*.sqlite3-journal
 _reference_super_crawler/
