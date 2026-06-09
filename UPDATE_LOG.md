@@ -23,6 +23,18 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-02: Intern Task C — Failure Recovery on super_crawler
+
+- Reframed by the mentor's training deck: Super Crawler is an agent-systems engineering case
+  study (state, queue, workers, logs, recovery), graded on traceable / verifiable / recoverable.
+- Implemented Task C on `_reference_super_crawler`: SQLite **WAL** + busy timeout; **atomic claim**
+  (compare-and-set in `lock_next_research`); a **reaper** (`requeue_orphaned_research`) wired into
+  the cycle so a restart re-queues stuck `researching`; **failure recovery** in `DeepResearchAgent.run_next`.
+- Added `tests/test_recovery.py` (5 reproducible tests) and made the existing suite Windows-runnable;
+  full reference suite now green (11 tests).
+- Wrote `docs/TASK_C_RECOVERY.md` (gaps → fixes → state machine → verification) and
+  `docs/INTERN_TASKS_PLAN.md` (codebase routing + sequenced plan for tasks A–E).
+
 ## 2026-06-02: Demand Intelligence Engine (closes + surpasses super_crawler)
 
 - Added `src/store/` SQLite knowledge base with cross-run accumulation (evidence keyed by canonical
