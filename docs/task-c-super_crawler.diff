@@ -1,0 +1,333 @@
+diff --git a/super_crawler/agents.py b/super_crawler/agents.py
+index a2dc8b1..0991bec 100644
+--- a/super_crawler/agents.py
++++ b/super_crawler/agents.py
+@@ -313,7 +313,12 @@ class DeepResearchAgent(BaseAgent):
+         if requirement is None:
+             self.log("run_next", "failed", [requirement_id], [], "requirement not found")
+             return None
+-        return self.research(requirement)
++        try:
++            return self.research(requirement)
++        except Exception as exc:  # noqa: BLE001 - a failed attempt must recover, not strand the task
++            self.storage.recover_failed_research(requirement_id, f"{type(exc).__name__}: {exc}")
++            self.log("run_next", "failed", [requirement_id], [], str(exc))
++            return None
+ 
+     def research(self, requirement: RequirementRecord) -> ResearchRun:
+         started = utc_now()
+diff --git a/super_crawler/runner.py b/super_crawler/runner.py
+index c306a80..e0b9f1e 100644
+--- a/super_crawler/runner.py
++++ b/super_crawler/runner.py
+@@ -23,10 +23,15 @@ class AlwaysOnRunner:
+             time.sleep(self.interval_seconds)
+ 
+     def run_once(self) -> dict[str, int | str | None]:
++        # Recover anything stranded as `researching` by a prior crash/restart before this
++        # cycle assigns new work. Safe here: no live worker holds a `researching` row yet.
++        recovered = self.storage.requeue_orphaned_research()
+         resources = self.storage.get_resource_config()
+         groups = self.storage.list_task_groups([TaskGroupStatus.RUNNING.value])
+         if groups:
+-            return self.run_task_groups(groups[: resources.get("max_search_agents", 3)])
++            result = self.run_task_groups(groups[: resources.get("max_search_agents", 3)])
++            result["recovered"] = len(recovered)
++            return result
+ 
+         items = load_json_items(self.input_dir)
+         candidates = DiscoveryAgent(self.storage, "discovery-daemon").ingest_reddit_items(items) if items else []
+@@ -38,6 +43,7 @@ class AlwaysOnRunner:
+             "candidates": len(candidates),
+             "requirements_changed": len(changed),
+             "reopened": len(reopened),
++            "recovered": len(recovered),
+             "research_run": research_runs[0] if research_runs else None,
+             "research_runs": ",".join(research_runs),
+         }
+diff --git a/super_crawler/storage.py b/super_crawler/storage.py
+index d2e337c..853bd40 100644
+--- a/super_crawler/storage.py
++++ b/super_crawler/storage.py
+@@ -32,6 +32,11 @@ class Storage:
+         self.conn = sqlite3.connect(self.db_path)
+         self.conn.row_factory = sqlite3.Row
+         self.conn.execute("PRAGMA foreign_keys = ON")
++        # WAL lets the dashboard read while the runtime writes without raising
++        # "database is locked"; busy_timeout waits instead of failing on contention.
++        self.conn.execute("PRAGMA journal_mode = WAL")
++        self.conn.execute("PRAGMA synchronous = NORMAL")
++        self.conn.execute("PRAGMA busy_timeout = 5000")
+ 
+     def __enter__(self) -> Storage:
+         return self
+@@ -280,29 +285,85 @@ class Storage:
+         self.conn.commit()
+ 
+     def lock_next_research(self, agent_id: str) -> str | None:
+-        row = self.conn.execute(
+-            """
+-            SELECT requirement_id FROM research_queue
+-            WHERE locked_by IS NULL
+-            ORDER BY priority DESC, created_at ASC
+-            LIMIT 1
+-            """
+-        ).fetchone()
+-        if row is None:
+-            return None
+-        requirement_id = row["requirement_id"]
+-        now = utc_now()
+-        self.conn.execute(
+-            "UPDATE research_queue SET locked_by=?, assigned_agent=?, updated_at=? WHERE requirement_id=?",
+-            (agent_id, agent_id, now, requirement_id),
+-        )
+-        self.conn.commit()
+-        return requirement_id
++        # Atomic claim: pick a free row, then UPDATE it only if it is *still* free
++        # (WHERE locked_by IS NULL). If another worker won the race, rowcount is 0 and we
++        # retry the next candidate. This prevents two workers grabbing the same requirement.
++        while True:
++            row = self.conn.execute(
++                """
++                SELECT requirement_id FROM research_queue
++                WHERE locked_by IS NULL
++                ORDER BY priority DESC, created_at ASC
++                LIMIT 1
++                """
++            ).fetchone()
++            if row is None:
++                return None
++            requirement_id = row["requirement_id"]
++            now = utc_now()
++            cursor = self.conn.execute(
++                "UPDATE research_queue SET locked_by=?, assigned_agent=?, updated_at=? "
++                "WHERE requirement_id=? AND locked_by IS NULL",
++                (agent_id, agent_id, now, requirement_id),
++            )
++            self.conn.commit()
++            if cursor.rowcount == 1:
++                return requirement_id
++            # Lost the race for this row; loop and try the next free one.
+ 
+     def dequeue_research(self, requirement_id: str) -> None:
+         self.conn.execute("DELETE FROM research_queue WHERE requirement_id=?", (requirement_id,))
+         self.conn.commit()
+ 
++    def requeue_orphaned_research(self) -> list[str]:
++        """Recover requirements stuck in ``researching`` after a worker/process died mid-run.
++
++        Resets each to ``queued_for_research``, clears the assignee, and unlocks (or
++        re-creates) its queue row so another worker can claim it. Safe to call at the start
++        of a cycle: anything still ``researching`` then has no live worker holding it.
++        Returns the recovered requirement ids.
++        """
++        rows = self.conn.execute(
++            "SELECT requirement_id FROM requirements WHERE status=?",
++            (RequirementStatus.RESEARCHING.value,),
++        ).fetchall()
++        recovered: list[str] = []
++        for row in rows:
++            self._requeue(row["requirement_id"], reason="recovered_orphaned_research")
++            recovered.append(row["requirement_id"])
++        return recovered
++
++    def recover_failed_research(self, requirement_id: str, error: str) -> None:
++        """A deep-research attempt raised; re-queue the requirement instead of stranding it."""
++
++        self._requeue(requirement_id, reason="research_failed", error=error)
++
++    def _requeue(self, requirement_id: str, reason: str, error: str | None = None) -> None:
++        now = utc_now()
++        requirement = self.get_requirement(requirement_id)
++        if requirement is not None:
++            requirement.status = RequirementStatus.QUEUED_FOR_RESEARCH
++            requirement.assigned_to = None
++            event: dict[str, Any] = {"at": now, "decision": reason}
++            if error:
++                event["error"] = error
++            requirement.decision_history.append(event)
++            self.upsert_requirement(requirement)
++        # Unlock an existing queue row, or recreate one if it was already dequeued.
++        cursor = self.conn.execute(
++            "UPDATE research_queue SET locked_by=NULL, assigned_agent=NULL, updated_at=? WHERE requirement_id=?",
++            (now, requirement_id),
++        )
++        self.conn.commit()
++        if cursor.rowcount == 0 and requirement is not None:
++            self.enqueue_research(
++                requirement_id=requirement_id,
++                priority=int(requirement.current_scores.get("overall_score", 50)),
++                reason=reason,
++                new_evidence_count=0,
++                previous_research_status=requirement.latest_recommendation,
++            )
++
+     def update_queue_priority(self, requirement_id: str, priority: int) -> None:
+         self.conn.execute(
+             "UPDATE research_queue SET priority=?, updated_at=? WHERE requirement_id=?",
+diff --git a/tests/test_recovery.py b/tests/test_recovery.py
+new file mode 100644
+index 0000000..8fd0730
+--- /dev/null
++++ b/tests/test_recovery.py
+@@ -0,0 +1,102 @@
++"""Task C — failure recovery & state-machine integrity.
++
++Reproducible tests for the production failure modes the training deck calls out (slide 6):
++crashed/stuck `researching`, double-claim races, DB-lock contention. Teardown is
++Windows-safe: connections are closed (LIFO addCleanup) before the temp dir is removed.
++"""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from super_crawler.agents import DeepResearchAgent, DiscoveryAgent, PoolManagerAgent
++from super_crawler.models import RequirementStatus
++from super_crawler.seed import SAMPLE_REDDIT_ITEMS
++from super_crawler.storage import Storage
++
++
++class RecoveryTests(unittest.TestCase):
++    def _storage(self) -> Storage:
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)  # LIFO: runs last
++        storage = Storage(Path(directory) / "test.sqlite3")
++        storage.migrate()
++        self.addCleanup(storage.close)  # LIFO: runs first, unlocks the file before rmtree
++        return storage
++
++    def _seed_queue(self, storage: Storage) -> None:
++        DiscoveryAgent(storage, "discovery").ingest_reddit_items(SAMPLE_REDDIT_ITEMS)
++        PoolManagerAgent(storage, "pool").reconcile_candidates()
++        self.assertTrue(storage.list_queue())  # precondition: something is queued
++
++    def test_wal_is_enabled(self) -> None:
++        storage = self._storage()
++        mode = storage.conn.execute("PRAGMA journal_mode").fetchone()[0]
++        self.assertEqual(mode.lower(), "wal")
++
++    def test_atomic_claim_prevents_double_lock(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        first = storage.lock_next_research("worker-a")
++        self.assertIsNotNone(first)
++        # A different worker must never be handed the same requirement.
++        second = storage.lock_next_research("worker-b")
++        self.assertNotEqual(first, second)
++
++    def test_reaper_requeues_orphaned_researching(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        rid = storage.lock_next_research("worker-a")
++        self.assertIsNotNone(rid)
++
++        # Simulate a worker that flipped to `researching` and then died mid-run.
++        requirement = storage.get_requirement(rid)
++        requirement.status = RequirementStatus.RESEARCHING
++        requirement.assigned_to = "worker-a"
++        storage.upsert_requirement(requirement)
++
++        recovered = storage.requeue_orphaned_research()
++        self.assertIn(rid, recovered)
++
++        healed = storage.get_requirement(rid)
++        self.assertEqual(healed.status, RequirementStatus.QUEUED_FOR_RESEARCH)
++        self.assertIsNone(healed.assigned_to)
++        # ...and it is claimable again.
++        self.assertEqual(storage.lock_next_research("worker-b"), rid)
++
++    def test_failed_research_is_requeued_not_stuck(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        agent = DeepResearchAgent(storage, "worker-a")
++
++        # Deep research blows up (e.g. LLM timeout / OpenCLI failure).
++        with patch.object(DeepResearchAgent, "research", side_effect=RuntimeError("LLM timeout")):
++            result = agent.run_next()
++
++        self.assertIsNone(result)
++        stuck = [r for r in storage.list_requirements() if r.status == RequirementStatus.RESEARCHING]
++        self.assertEqual(stuck, [])  # nothing stranded
++        self.assertIsNotNone(storage.lock_next_research("worker-b"))  # back in the queue
++
++    def test_recovery_is_idempotent(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        rid = storage.lock_next_research("worker-a")
++        requirement = storage.get_requirement(rid)
++        requirement.status = RequirementStatus.RESEARCHING
++        storage.upsert_requirement(requirement)
++
++        # Running the reaper twice must not create duplicate queue rows or dirty state.
++        storage.requeue_orphaned_research()
++        queue_after_first = len(storage.list_queue())
++        storage.requeue_orphaned_research()
++        queue_after_second = len(storage.list_queue())
++        self.assertEqual(queue_after_first, queue_after_second)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_system.py b/tests/test_system.py
+index bba9fa7..7933e17 100644
+--- a/tests/test_system.py
++++ b/tests/test_system.py
+@@ -15,7 +15,7 @@ from super_crawler.storage import Storage
+ 
+ class SystemTests(unittest.TestCase):
+     def test_end_to_end_cycle(self) -> None:
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+             storage = Storage(Path(directory) / "test.sqlite3")
+             storage.migrate()
+ 
+@@ -41,7 +41,7 @@ class SystemTests(unittest.TestCase):
+             )
+ 
+     def test_dashboard_counts_include_product_stores(self) -> None:
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+             storage = Storage(Path(directory) / "test.sqlite3")
+             storage.migrate()
+             counts = storage.dashboard_counts()
+@@ -62,7 +62,7 @@ class SystemTests(unittest.TestCase):
+             )
+ 
+     def test_home_page_includes_runtime_controls(self) -> None:
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+             db_path = Path(directory) / "test.sqlite3"
+             storage = Storage(db_path)
+             storage.migrate()
+@@ -77,7 +77,7 @@ class SystemTests(unittest.TestCase):
+             self.assertIn("Create Task Group", html)
+ 
+     def test_runtime_saves_pipeline_snapshot(self) -> None:
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+             db_path = Path(directory) / "test.sqlite3"
+             storage = Storage(db_path)
+             storage.migrate()
+@@ -96,7 +96,7 @@ class SystemTests(unittest.TestCase):
+             self.assertTrue(snapshot["requirement_snapshot"])
+ 
+     def test_task_group_runs_and_tags_requirement_lineage(self) -> None:
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+             db_path = Path(directory) / "test.sqlite3"
+             inbox = Path(directory) / "pet_care"
+             inbox.mkdir()
+@@ -123,7 +123,7 @@ class SystemTests(unittest.TestCase):
+             self.assertTrue(any(task_group.task_group_id in requirement.task_group_ids for requirement in requirements))
+ 
+     def test_archived_task_group_hidden_on_page_one_but_kept_for_lineage(self) -> None:
+-        with tempfile.TemporaryDirectory() as directory:
++        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+             db_path = Path(directory) / "test.sqlite3"
+             inbox = Path(directory) / "pet_care"
+             inbox.mkdir()

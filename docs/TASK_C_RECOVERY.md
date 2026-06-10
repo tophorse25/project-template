@@ -5,6 +5,11 @@ OpenCLI / LLM-timeout / DB-lock failures; re-queue stuck `researching`.* Impleme
 `_reference_super_crawler` (the system the deck describes). Hits the mentor's grading
 criterion **"failures recoverable"** directly.
 
+> **The exact code change** is in [`task-c-super_crawler.diff`](task-c-super_crawler.diff) —
+> a unified diff against `ShuhangGe/super_crawler@main` (5 files). It's committed locally on the
+> `intern/task-c-recovery` branch of that clone; apply with `git apply` or open as a PR once fork/push
+> access is available.
+
 ## The three failure modes found (slide-6 problems, confirmed in code)
 
 1. **Stuck `researching` (the headline bug).**
