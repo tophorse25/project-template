@@ -23,6 +23,18 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-02: Intern Task A — Real Worker State + Heartbeat Status Panel
+
+- Built on Task C, branch `intern/task-a-observability` of the super_crawler clone.
+- Added a `workers` table + lifecycle methods; every stage write doubles as a heartbeat.
+- DeepResearchAgent now reports real stage transitions (claiming → analyzing_evidence → scoring →
+  synthesizing → writing_conclusion → idle); failures record `last_error`.
+- Made the Task C reaper **heartbeat-aware**: it skips requirements held by live fresh workers and
+  reclaims only missing/stale holders — recovery is safe beside concurrent workers.
+- Dashboard: new "Deep Workers (real state)" panel (stage, requirement, heartbeat age, stale warning);
+  slot counts now from live workers, not locked queue rows; queue rows relabeled "Waiting in queue".
+- 6 new tests; full reference suite 17/17 green. Writeup: `docs/TASK_A_WORKERS.md` + diff.
+
 ## 2026-06-02: Intern Task C — Failure Recovery on super_crawler
 
 - Reframed by the mentor's training deck: Super Crawler is an agent-systems engineering case

@@ -1,0 +1,382 @@
+diff --git a/super_crawler/agents.py b/super_crawler/agents.py
+index 0991bec..c03d8ab 100644
+--- a/super_crawler/agents.py
++++ b/super_crawler/agents.py
+@@ -313,10 +313,13 @@ class DeepResearchAgent(BaseAgent):
+         if requirement is None:
+             self.log("run_next", "failed", [requirement_id], [], "requirement not found")
+             return None
++        self.storage.update_worker_state(self.agent_id, "claiming", requirement_id)
+         try:
+             return self.research(requirement)
+         except Exception as exc:  # noqa: BLE001 - a failed attempt must recover, not strand the task
+-            self.storage.recover_failed_research(requirement_id, f"{type(exc).__name__}: {exc}")
++            error = f"{type(exc).__name__}: {exc}"
++            self.storage.recover_failed_research(requirement_id, error)
++            self.storage.mark_worker_idle(self.agent_id, error=error)
+             self.log("run_next", "failed", [requirement_id], [], str(exc))
+             return None
+ 
+@@ -326,10 +329,16 @@ class DeepResearchAgent(BaseAgent):
+         requirement.assigned_to = self.agent_id
+         self.storage.upsert_requirement(requirement)
+ 
++        # Real stage transitions; each update is also this worker's heartbeat.
++        self.storage.update_worker_state(self.agent_id, "analyzing_evidence", requirement.requirement_id)
+         evidence = self.storage.list_evidence(requirement.evidence_ids)
++
++        self.storage.update_worker_state(self.agent_id, "scoring", requirement.requirement_id)
+         scores = score_requirement(requirement, evidence)
+         positives = [item for item in evidence if item.matched_patterns]
+         geo = requirement.geo_distribution
++
++        self.storage.update_worker_state(self.agent_id, "synthesizing", requirement.requirement_id)
+         alternatives = infer_existing_solutions(evidence)
+         opportunities = infer_opportunities(requirement, evidence)
+         recommendation = make_recommendation(scores)
+@@ -372,6 +381,7 @@ class DeepResearchAgent(BaseAgent):
+             ],
+             changed_since_last_run=detect_change(requirement),
+         )
++        self.storage.update_worker_state(self.agent_id, "writing_conclusion", requirement.requirement_id)
+         self.storage.upsert_research_run(run)
+ 
+         requirement.status = self._status_from_scores(scores)
+@@ -382,6 +392,7 @@ class DeepResearchAgent(BaseAgent):
+         requirement.decision_history.append({"at": utc_now(), "decision": requirement.status.value, "research_run": run_id})
+         self.storage.upsert_requirement(requirement)
+         self.storage.dequeue_research(requirement.requirement_id)
++        self.storage.mark_worker_idle(self.agent_id)
+         self.log("run_next", "completed", [requirement.requirement_id], [run.research_run_id])
+         return run
+ 
+diff --git a/super_crawler/dashboard.py b/super_crawler/dashboard.py
+index d6ffbc6..32437e8 100644
+--- a/super_crawler/dashboard.py
++++ b/super_crawler/dashboard.py
+@@ -297,6 +297,7 @@ def home_page(storage: Storage, controller: RuntimeController) -> str:
+         "<h1>Running Status</h1>"
+         + runtime_controls(runtime)
+         + resource_allocation_panel(storage)
++        + deep_workers_panel(storage)
+         + "<section class='grid'>"
+         + "".join(f"<div class='card'><div class='muted'>{label}</div><div class='metric'>{value}</div></div>" for label, value in cards)
+         + "</section>"
+@@ -327,7 +328,11 @@ def resource_allocation_panel(storage: Storage) -> str:
+     resources = storage.get_resource_config()
+     running_search = len(storage.list_task_groups([TaskGroupStatus.RUNNING.value]))
+     queue = storage.list_queue()
+-    locked_research = len([item for item in queue if item.get("locked_by")])
++    # Count real busy workers (fresh heartbeat), not locked queue rows — a locked row can
++    # belong to a dead worker, and a queue item is not an agent.
++    locked_research = len(
++        [w for w in storage.list_workers() if w["stage"] != "idle" and w["heartbeat_age_seconds"] < 300]
++    )
+     return f"""
+     <section class="controlbar">
+       <div>
+@@ -344,6 +349,54 @@ def resource_allocation_panel(storage: Storage) -> str:
+     """
+ 
+ 
++def deep_workers_panel(storage: Storage, stale_after_seconds: float = 300.0) -> str:
++    """Real worker state: stage, current requirement, heartbeat age.
++
++    This is the truth panel — driven by the workers table that workers heartbeat into,
++    not inferred from queue rows. A queue item is not an agent.
++    """
++    workers = storage.list_workers()
++    if not workers:
++        rows = "<p class='muted'>No worker has run yet. Worker state appears after the first deep research cycle.</p>"
++    else:
++        items = []
++        for worker in workers:
++            age = worker["heartbeat_age_seconds"]
++            busy = worker["stage"] != "idle"
++            stale = busy and age > stale_after_seconds
++            freshness = "STALE — recovery will requeue its task" if stale else f"heartbeat {age:.0f}s ago"
++            status_class = "status running" if busy and not stale else "status"
++            requirement = worker["current_requirement_id"]
++            requirement_html = (
++                f"<a href='/requirement?id={html.escape(requirement)}'>{html.escape(requirement)}</a>"
++                if requirement
++                else "—"
++            )
++            error_html = (
++                f"<div class='summary'>last error: {html.escape(str(worker['last_error']))}</div>"
++                if worker["last_error"]
++                else ""
++            )
++            items.append(
++                f"""
++                <div class="item">
++                  <div class="title">{html.escape(worker["worker_id"])}</div>
++                  <div><span class="{status_class}">{html.escape(worker["stage"])}</span></div>
++                  <div class="summary">requirement: {requirement_html}</div>
++                  <div class="summary">{html.escape(freshness)}</div>
++                  {error_html}
++                </div>
++                """
++            )
++        rows = "".join(items)
++    return (
++        "<section class='panel'><h2>Deep Workers (real state)</h2>"
++        "<p class='muted'>Each worker reports its actual stage and heartbeat. Stale workers are recovered automatically.</p>"
++        + rows
++        + "</section>"
++    )
++
++
+ def agent_cards(storage: Storage, roles: list[str], ref: str | None = None) -> str:
+     logs = storage.list_activity_logs(200)
+     runtime_agents = []
+@@ -432,7 +485,7 @@ def deep_research_agents_panel(storage: Storage) -> str:
+     items = agent_cards(storage, ["deep_research", "report"])
+     queue = storage.list_queue()
+     queue_text = "".join(
+-        f"<div class='summary'>Consuming queue: {html.escape(row['requirement_id'])} priority {row['priority']}</div>"
++        f"<div class='summary'>Waiting in queue: {html.escape(row['requirement_id'])} priority {row['priority']}</div>"
+         for row in queue[:5]
+     )
+     return (
+@@ -448,7 +501,7 @@ def task_group_deep_research_panel(storage: Storage, task_group: object, require
+     requirement_ids = {item.requirement_id for item in requirements}
+     queue = [row for row in storage.list_queue() if row["requirement_id"] in requirement_ids]
+     queue_text = "".join(
+-        f"<div class='summary'>Consuming queue: {html.escape(row['requirement_id'])} priority {row['priority']}</div>"
++        f"<div class='summary'>Waiting in queue: {html.escape(row['requirement_id'])} priority {row['priority']}</div>"
+         for row in queue[:5]
+     ) or "<p class='muted'>No deep research queue item for this task group.</p>"
+     return (
+diff --git a/super_crawler/storage.py b/super_crawler/storage.py
+index 853bd40..3d1293c 100644
+--- a/super_crawler/storage.py
++++ b/super_crawler/storage.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import json
+ import sqlite3
+ from dataclasses import asdict, fields, is_dataclass
++from datetime import UTC, datetime
+ from pathlib import Path
+ from typing import Any, Iterable, TypeVar
+ 
+@@ -203,6 +204,16 @@ class Storage:
+                 value INTEGER NOT NULL,
+                 updated_at TEXT NOT NULL
+             );
++
++            CREATE TABLE IF NOT EXISTS workers (
++                worker_id TEXT PRIMARY KEY,
++                role TEXT NOT NULL,
++                stage TEXT NOT NULL,
++                current_requirement_id TEXT,
++                started_at TEXT NOT NULL,
++                heartbeat_at TEXT NOT NULL,
++                last_error TEXT
++            );
+             """
+         )
+         self._ensure_column("raw_evidence", "task_group_id", "TEXT")
+@@ -315,13 +326,15 @@ class Storage:
+         self.conn.execute("DELETE FROM research_queue WHERE requirement_id=?", (requirement_id,))
+         self.conn.commit()
+ 
+-    def requeue_orphaned_research(self) -> list[str]:
+-        """Recover requirements stuck in ``researching`` after a worker/process died mid-run.
++    def requeue_orphaned_research(self, stale_after_seconds: float = 300.0) -> list[str]:
++        """Recover requirements stuck in ``researching`` whose worker is gone or stale.
+ 
+-        Resets each to ``queued_for_research``, clears the assignee, and unlocks (or
+-        re-creates) its queue row so another worker can claim it. Safe to call at the start
+-        of a cycle: anything still ``researching`` then has no live worker holding it.
+-        Returns the recovered requirement ids.
++        Heartbeat-aware: a ``researching`` requirement is orphaned only if no worker row
++        currently holds it, or the holding worker's heartbeat is older than
++        ``stale_after_seconds``. Requirements held by a live, fresh worker are left alone,
++        so the reaper is safe to run while concurrent workers are mid-research.
++        Orphans are reset to ``queued_for_research``, unassigned, and unlocked (or
++        re-enqueued) so another worker can claim them. Returns recovered ids.
+         """
+         rows = self.conn.execute(
+             "SELECT requirement_id FROM requirements WHERE status=?",
+@@ -329,10 +342,62 @@ class Storage:
+         ).fetchall()
+         recovered: list[str] = []
+         for row in rows:
+-            self._requeue(row["requirement_id"], reason="recovered_orphaned_research")
+-            recovered.append(row["requirement_id"])
++            requirement_id = row["requirement_id"]
++            holder = self.conn.execute(
++                "SELECT heartbeat_at FROM workers WHERE current_requirement_id=? AND stage != 'idle'",
++                (requirement_id,),
++            ).fetchone()
++            if holder is not None and self._seconds_since(holder["heartbeat_at"]) < stale_after_seconds:
++                continue  # a live worker is actively on it
++            self._requeue(requirement_id, reason="recovered_orphaned_research")
++            recovered.append(requirement_id)
+         return recovered
+ 
++    def update_worker_state(
++        self,
++        worker_id: str,
++        stage: str,
++        requirement_id: str | None = None,
++        role: str = "deep_research",
++        error: str | None = None,
++    ) -> None:
++        """Record a worker's real stage + heartbeat. Each call IS the heartbeat."""
++
++        now = utc_now()
++        self.conn.execute(
++            """
++            INSERT INTO workers (worker_id, role, stage, current_requirement_id, started_at, heartbeat_at, last_error)
++            VALUES (?, ?, ?, ?, ?, ?, ?)
++            ON CONFLICT(worker_id) DO UPDATE SET
++                role=excluded.role,
++                stage=excluded.stage,
++                current_requirement_id=excluded.current_requirement_id,
++                heartbeat_at=excluded.heartbeat_at,
++                last_error=excluded.last_error
++            """,
++            (worker_id, role, stage, requirement_id, now, now, error),
++        )
++        self.conn.commit()
++
++    def mark_worker_idle(self, worker_id: str, error: str | None = None) -> None:
++        self.update_worker_state(worker_id, "idle", requirement_id=None, error=error)
++
++    def list_workers(self) -> list[dict[str, Any]]:
++        rows = self.conn.execute("SELECT * FROM workers ORDER BY heartbeat_at DESC").fetchall()
++        workers = []
++        for row in rows:
++            item = dict(row)
++            item["heartbeat_age_seconds"] = round(self._seconds_since(item["heartbeat_at"]), 1)
++            workers.append(item)
++        return workers
++
++    def _seconds_since(self, iso_timestamp: str) -> float:
++        try:
++            then = datetime.fromisoformat(iso_timestamp)
++        except (TypeError, ValueError):
++            return float("inf")
++        return (datetime.now(UTC) - then).total_seconds()
++
+     def recover_failed_research(self, requirement_id: str, error: str) -> None:
+         """A deep-research attempt raised; re-queue the requirement instead of stranding it."""
+ 
+diff --git a/tests/test_workers.py b/tests/test_workers.py
+new file mode 100644
+index 0000000..fea24bb
+--- /dev/null
++++ b/tests/test_workers.py
+@@ -0,0 +1,110 @@
++"""Task A — real worker state, heartbeats, and the status panel.
++
++The deck's principle (slides 5-7): items in the queue are not agents; which agents are
++running must come from real worker state, and the dashboard must show that state. These
++tests cover the worker lifecycle, heartbeat-aware recovery, and the panel rendering.
++Teardown is Windows-safe (close connections before removing the temp dir).
++"""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from super_crawler.agents import DeepResearchAgent, DiscoveryAgent, PoolManagerAgent
++from super_crawler.dashboard import deep_workers_panel
++from super_crawler.models import RequirementStatus
++from super_crawler.seed import SAMPLE_REDDIT_ITEMS
++from super_crawler.storage import Storage
++
++
++class WorkerStateTests(unittest.TestCase):
++    def _storage(self) -> Storage:
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)
++        storage = Storage(Path(directory) / "test.sqlite3")
++        storage.migrate()
++        self.addCleanup(storage.close)
++        return storage
++
++    def _seed_queue(self, storage: Storage) -> None:
++        DiscoveryAgent(storage, "discovery").ingest_reddit_items(SAMPLE_REDDIT_ITEMS)
++        PoolManagerAgent(storage, "pool").reconcile_candidates()
++        self.assertTrue(storage.list_queue())
++
++    def test_worker_state_records_stage_requirement_and_heartbeat(self) -> None:
++        storage = self._storage()
++        storage.update_worker_state("worker-1", "scoring", "REQ-X")
++        workers = storage.list_workers()
++        self.assertEqual(len(workers), 1)
++        worker = workers[0]
++        self.assertEqual(worker["stage"], "scoring")
++        self.assertEqual(worker["current_requirement_id"], "REQ-X")
++        self.assertLess(worker["heartbeat_age_seconds"], 5.0)
++
++    def test_completed_research_leaves_worker_idle(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        run = DeepResearchAgent(storage, "worker-1").run_next()
++        self.assertIsNotNone(run)
++        worker = storage.list_workers()[0]
++        self.assertEqual(worker["stage"], "idle")
++        self.assertIsNone(worker["current_requirement_id"])
++        self.assertIsNone(worker["last_error"])
++
++    def test_failed_research_marks_worker_idle_with_error(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        agent = DeepResearchAgent(storage, "worker-1")
++        with patch.object(DeepResearchAgent, "research", side_effect=RuntimeError("LLM timeout")):
++            self.assertIsNone(agent.run_next())
++        worker = storage.list_workers()[0]
++        self.assertEqual(worker["stage"], "idle")
++        self.assertIn("LLM timeout", worker["last_error"])
++
++    def test_reaper_skips_requirement_held_by_fresh_worker(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        rid = storage.lock_next_research("worker-1")
++        requirement = storage.get_requirement(rid)
++        requirement.status = RequirementStatus.RESEARCHING
++        storage.upsert_requirement(requirement)
++        storage.update_worker_state("worker-1", "scoring", rid)  # fresh heartbeat
++
++        recovered = storage.requeue_orphaned_research(stale_after_seconds=300.0)
++
++        self.assertNotIn(rid, recovered)
++        self.assertEqual(storage.get_requirement(rid).status, RequirementStatus.RESEARCHING)
++
++    def test_reaper_reclaims_requirement_with_stale_heartbeat(self) -> None:
++        storage = self._storage()
++        self._seed_queue(storage)
++        rid = storage.lock_next_research("worker-1")
++        requirement = storage.get_requirement(rid)
++        requirement.status = RequirementStatus.RESEARCHING
++        storage.upsert_requirement(requirement)
++        storage.update_worker_state("worker-1", "scoring", rid)
++
++        # stale_after=0 means any heartbeat age counts as stale.
++        recovered = storage.requeue_orphaned_research(stale_after_seconds=0.0)
++
++        self.assertIn(rid, recovered)
++        self.assertEqual(storage.get_requirement(rid).status, RequirementStatus.QUEUED_FOR_RESEARCH)
++        self.assertEqual(storage.lock_next_research("worker-2"), rid)
++
++    def test_dashboard_panel_shows_real_worker_state(self) -> None:
++        storage = self._storage()
++        storage.update_worker_state("deep-worker-3", "synthesizing", "REQ-2026-000001")
++        html = deep_workers_panel(storage)
++        self.assertIn("Deep Workers (real state)", html)
++        self.assertIn("deep-worker-3", html)
++        self.assertIn("synthesizing", html)
++        self.assertIn("REQ-2026-000001", html)
++        self.assertIn("heartbeat", html)
++
++
++if __name__ == "__main__":
++    unittest.main()
