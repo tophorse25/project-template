@@ -23,6 +23,17 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-11: Closed the Loop — First Validated Requirement End to End
+
+- Ran the full pipeline live for the first time: LLM plan (qwen2.5:3b) → live Reddit crawl
+  (7 planned queries, 82 records) → `src/bridge_to_inbox.py` (new) → agent inbox → discovery →
+  pool → deep research.
+- `REQ-2026-000001` (dog medication tracking) reached **validated** (score 84, 9 evidence items,
+  6 subreddits) through the system's own machinery; pool grew 5 → 17 requirements.
+- Real data surfaced two genuine super_crawler bugs, both fixed + regression-tested on the
+  Task B branch: a Windows UTF-8 ingestion crash, and ~0% discovery recall on real Reddit
+  phrasing (patterns broadened evidence-first; new `builder_activity` signal). 27/27 tests green.
+
 ## 2026-06-11: Intern Task B — LLM Search Planner (Ollama) with Feedback Loop
 
 - Added `SearchPlannerAgent` + stdlib Ollama client on branch `intern/task-b-llm-planner`:

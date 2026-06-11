@@ -69,8 +69,38 @@ python -m super_crawler.cli plan --task-group tg_pet_care_search_0001 \
 # no Ollama? same command works - engine falls back to "heuristic"
 ```
 
-## Tests — `tests/test_planner.py` (6, all green; full suite 23/23)
+## Tests — `tests/test_planner.py` (6, all green; full suite 27/27)
 
 Fake LLM client, zero network: persistence + query coercion, feedback-reaches-prompt,
 fallback on unavailable model, fallback with no client, crawl-config export, dashboard
 rendering.
+
+## The loop, closed (2026-06-11)
+
+The full slide-3 pipeline ran end to end for the first time:
+
+```
+LLM plan (qwen2.5:3b) ─▶ live Reddit crawl (7 queries, 82 records)
+      ▲                          │ src/bridge_to_inbox.py (project-template)
+      │ feedback                 ▼
+deep research ◀─ pool ◀─ discovery ◀─ reddit_inbox (64 unique items)
+```
+
+**Result:** `REQ-2026-000001` (dog medication tracking) went seed → rejected → reopened →
+watching → **validated** (score 84.0, 9 evidence items, 6 subreddits), entirely through the
+system's own machinery. Pool grew 5 → 17 requirements with real workaround evidence
+(Gmail calendar, pill organizers) and named competitors (PupPlan, Medisafe, EveryDose).
+
+Closing the loop with real data surfaced two genuine bugs, both fixed + regression-tested:
+
+1. **UTF-8 ingestion crash** — `load_json_items` used the Windows locale codec and died on a
+   curly apostrophe in a real title. All file IO now explicit UTF-8.
+2. **Discovery recall was ~0%** — the original `SIGNAL_PATTERNS` missed all 64 real titles
+   ("App for keeping track of dog meds?", "How do you keep track of…", "I built an app to…").
+   Patterns were broadened evidence-first — every addition is pinned to a real crawled title
+   in `tests/test_signal_patterns.py`, with neutral-title false-positive guards — and a new
+   `builder_activity` signal counts "I built an app for this" posts as demand evidence.
+   Same crawl after the fix: 4 → 27 candidates, 5 → 17 requirements.
+
+This is Task B's mandate in action: *analyze where results are lost, improve the strategy,
+verify with evidence.*
