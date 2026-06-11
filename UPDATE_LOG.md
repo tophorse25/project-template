@@ -23,6 +23,17 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-11: Intern Task B — LLM Search Planner (Ollama) with Feedback Loop
+
+- Added `SearchPlannerAgent` + stdlib Ollama client on branch `intern/task-b-llm-planner`:
+  the LLM turns a research goal into dimensions, user-voice queries, sources, noise filters,
+  and validation hypotheses — and reads deep-research feedback so each round converges.
+- Flag-gated with a deterministic heuristic fallback: no Ollama → system runs exactly as before.
+- `cli plan --export-config` bridges plans to the project Reddit collector's crawl-config format.
+- Verified live with qwen2.5:3b on the deployed agent's DB: the model's negative keywords
+  reproduced the deep researcher's rejected noise (lunchbox/meal-prep) — feedback loop proven.
+- Plan renders on the live dashboard; 6 new fake-client tests; full suite 23/23 green.
+
 ## 2026-06-11: Deployed the super_crawler Agent (always-on, this machine)
 
 - Deployed the agent with the Task A+C improvements as an always-on process: dashboard + runtime

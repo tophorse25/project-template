@@ -1,0 +1,641 @@
+diff --git a/super_crawler/agents.py b/super_crawler/agents.py
+index c03d8ab..db54e55 100644
+--- a/super_crawler/agents.py
++++ b/super_crawler/agents.py
+@@ -5,6 +5,7 @@ from collections import Counter
+ from statistics import mean
+ from typing import Any
+ 
++from .llm import LLMUnavailable
+ from .models import (
+     AgentActivityLog,
+     CandidateRequirement,
+@@ -12,6 +13,7 @@ from .models import (
+     RequirementRecord,
+     RequirementStatus,
+     ResearchRun,
++    SearchPlan,
+     SignalLabel,
+     utc_now,
+ )
+@@ -405,6 +407,152 @@ class DeepResearchAgent(BaseAgent):
+         return RequirementStatus.REJECTED
+ 
+ 
++_PLANNER_SYSTEM = (
++    "You are the search planner for a Reddit requirement-discovery system. "
++    "You turn a research goal into a concrete search strategy. "
++    "Respond with STRICT JSON only - one object, no prose."
++)
++
++
++class SearchPlannerAgent(BaseAgent):
++    """Plans the next search round: dimensions, queries, sources, hypotheses.
++
++    Uses a local LLM (Ollama) when one is reachable, and reads deep-research
++    feedback so each round converges (which sources were noisy, what got
++    rejected and why). Falls back to a deterministic template plan when no
++    model is available, so the system never stalls on a missing dependency.
++    """
++
++    role = "search_planner"
++
++    def __init__(self, storage: Storage, agent_id: str, client=None):
++        super().__init__(storage, agent_id)
++        self.client = client
++
++    def plan(self, task_group=None, goal: str | None = None) -> SearchPlan:
++        goal_text = goal or (
++            f"{task_group.domain or task_group.name} user requirements" if task_group else "general user requirements"
++        )
++        feedback = self._feedback_summary(task_group)
++        try:
++            if self.client is None:
++                raise LLMUnavailable("no LLM client configured")
++            raw = self.client.generate_json(self._prompt(goal_text, task_group, feedback), system=_PLANNER_SYSTEM)
++            plan = self._coerce(raw, goal_text, task_group, feedback, engine=self.client.engine_name())
++            self.log("plan", "completed", [task_group.task_group_id] if task_group else [], [plan.plan_id])
++        except LLMUnavailable as exc:
++            plan = self._heuristic_plan(goal_text, task_group, feedback)
++            self.log("plan", "fallback_heuristic", [task_group.task_group_id] if task_group else [], [plan.plan_id], str(exc))
++        self.storage.upsert_search_plan(plan)
++        return plan
++
++    def _feedback_summary(self, task_group) -> str:
++        requirements = self.storage.list_requirements()
++        if task_group is not None:
++            requirements = [r for r in requirements if task_group.task_group_id in r.task_group_ids]
++        if not requirements:
++            return "No prior outcomes yet; this is the first search round."
++
++        by_status: Counter[str] = Counter(r.status.value for r in requirements)
++        noisy_sources: Counter[str] = Counter()
++        rejection_reasons: list[str] = []
++        for requirement in requirements:
++            if requirement.status != RequirementStatus.REJECTED:
++                continue
++            for item in self.storage.list_evidence(requirement.evidence_ids):
++                noisy_sources[item.subreddit] += 1
++            runs = self.storage.list_research_runs(requirement.requirement_id)
++            if runs and len(rejection_reasons) < 5:
++                rejection_reasons.append(f"{requirement.canonical_requirement[:60]}: {runs[0].findings.get('why_noise', '')}")
++
++        parts = [f"outcomes so far: {dict(by_status)}"]
++        if noisy_sources:
++            noisy = ", ".join(f"{source} ({count} rejected)" for source, count in noisy_sources.most_common(3))
++            parts.append(f"noisier sources: {noisy}")
++        if rejection_reasons:
++            parts.append("rejection reasons: " + " | ".join(rejection_reasons))
++        return "; ".join(parts)
++
++    def _prompt(self, goal: str, task_group, feedback: str) -> str:
++        keywords = ", ".join(task_group.keywords) if task_group and task_group.keywords else "none given"
++        sources = ", ".join(task_group.subreddits) if task_group and task_group.subreddits else "none given"
++        return (
++            f"Research goal: discover real user requirements about: {goal}\n"
++            f"Known keywords: {keywords}\n"
++            f"Sources already searched: {sources}\n"
++            f"Feedback from previous rounds: {feedback}\n\n"
++            "Plan the next search round. Queries must be phrased the way real Reddit users write "
++            "(tool requests, frustration, workarounds, alternatives) - not like marketing keywords. "
++            "Use the feedback: avoid noisy sources, do not repeat query styles that produced rejected "
++            "requirements, and propose hypotheses deep research should test.\n\n"
++            "Return JSON exactly in this shape:\n"
++            "{\n"
++            '  "dimensions": ["3-5 search angles"],\n'
++            '  "queries": [{"query": "search text", "rationale": "why"}],\n'
++            '  "sources": ["r/subreddit names to prioritize"],\n'
++            '  "negative_keywords": ["terms that mark noise"],\n'
++            '  "validation_hypotheses": ["claims deep research should verify"]\n'
++            "}\n"
++            "Give 4 to 8 queries."
++        )
++
++    def _coerce(self, raw: dict, goal: str, task_group, feedback: str, engine: str) -> SearchPlan:
++        queries: list[dict[str, str]] = []
++        for item in raw.get("queries", [])[:10]:
++            if isinstance(item, str):
++                queries.append({"query": item, "rationale": ""})
++            elif isinstance(item, dict) and item.get("query"):
++                queries.append({"query": str(item["query"]), "rationale": str(item.get("rationale", ""))})
++        if not queries:
++            raise LLMUnavailable("model returned no usable queries")
++
++        def str_list(key: str, cap: int = 8) -> list[str]:
++            return [str(value) for value in raw.get(key, []) if str(value).strip()][:cap]
++
++        return self._build_plan(goal, task_group, feedback, engine, str_list("dimensions"), queries,
++                                str_list("sources"), str_list("negative_keywords"), str_list("validation_hypotheses"))
++
++    def _heuristic_plan(self, goal: str, task_group, feedback: str) -> SearchPlan:
++        seeds = (task_group.keywords if task_group and task_group.keywords else [goal])[:3]
++        queries = []
++        for seed in seeds:
++            queries.extend(
++                [
++                    {"query": f"is there a tool for {seed}", "rationale": "tool-request signal"},
++                    {"query": f"{seed} frustrating", "rationale": "complaint signal"},
++                    {"query": f"alternatives to {seed}", "rationale": "alternative-seeking signal"},
++                ]
++            )
++        return self._build_plan(
++            goal,
++            task_group,
++            feedback,
++            "heuristic",
++            ["tool requests", "complaints", "workarounds", "alternatives"],
++            queries[:8],
++            list(task_group.subreddits) if task_group and task_group.subreddits else [],
++            list(task_group.negative_keywords) if task_group and task_group.negative_keywords else [],
++            ["the pain appears in more than one subreddit", "users mention paying for a workaround"],
++        )
++
++    def _build_plan(self, goal, task_group, feedback, engine, dimensions, queries, sources, negative, hypotheses) -> SearchPlan:
++        created_at = utc_now()
++        plan_id = "plan_" + hashlib.sha1(f"{goal}|{engine}|{created_at}".encode()).hexdigest()[:12]
++        return SearchPlan(
++            plan_id=plan_id,
++            task_group_id=task_group.task_group_id if task_group else None,
++            goal=goal,
++            engine=engine,
++            dimensions=dimensions,
++            queries=queries,
++            sources=sources,
++            negative_keywords=negative,
++            validation_hypotheses=hypotheses,
++            feedback_summary=feedback,
++            created_at=created_at,
++        )
++
++
+ class ReportAgent(BaseAgent):
+     role = "report"
+ 
+diff --git a/super_crawler/cli.py b/super_crawler/cli.py
+index 8e05164..0fad318 100644
+--- a/super_crawler/cli.py
++++ b/super_crawler/cli.py
+@@ -4,9 +4,19 @@ import argparse
+ import json
+ from pathlib import Path
+ 
+-from .agents import ChangeDetectionAgent, DeepResearchAgent, DiscoveryAgent, PoolManagerAgent, ReportAgent
++from dataclasses import asdict
++
++from .agents import (
++    ChangeDetectionAgent,
++    DeepResearchAgent,
++    DiscoveryAgent,
++    PoolManagerAgent,
++    ReportAgent,
++    SearchPlannerAgent,
++)
+ from .dashboard import serve_dashboard
+-from .models import RequirementStatus, TaskGroupStatus, TaskGroupType
++from .llm import DEFAULT_OLLAMA_URL, OllamaClient
++from .models import RequirementStatus, SearchPlan, TaskGroupStatus, TaskGroupType
+ from .runner import AlwaysOnRunner
+ from .seed import SAMPLE_REDDIT_ITEMS
+ from .storage import DEFAULT_DB_PATH, Storage
+@@ -59,6 +69,13 @@ def main() -> None:
+     report = subcommands.add_parser("report", help="Generate a daily report")
+     report.add_argument("--out", default="reports/daily.md", help="Markdown output path")
+ 
++    plan = subcommands.add_parser("plan", help="Generate a search plan (uses local Ollama LLM when available)")
++    plan.add_argument("--task-group", help="Plan for an existing task group id")
++    plan.add_argument("--goal", help="Free-form research goal when no task group is given")
++    plan.add_argument("--model", help="Ollama model name (default: $OLLAMA_MODEL or first pulled model)")
++    plan.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL, help="Ollama server URL")
++    plan.add_argument("--export-config", help="Also write the queries as a Reddit-collector crawl config JSON")
++
+     serve = subcommands.add_parser("serve", help="Serve the local dashboard")
+     serve.add_argument("--host", default="127.0.0.1")
+     serve.add_argument("--port", type=int, default=8000)
+@@ -148,6 +165,17 @@ def main() -> None:
+             output.parent.mkdir(parents=True, exist_ok=True)
+             output.write_text(ReportAgent(storage, "report-agent").daily_report())
+             print(f"Wrote {output}")
++        elif args.command == "plan":
++            task_group = storage.get_task_group(args.task_group) if args.task_group else None
++            if args.task_group and task_group is None:
++                raise SystemExit(f"Unknown task group: {args.task_group}")
++            client = OllamaClient(args.ollama_url, args.model)
++            planner = SearchPlannerAgent(storage, "search-planner-1", client)
++            search_plan = planner.plan(task_group=task_group, goal=args.goal)
++            print(json.dumps(asdict(search_plan), indent=2, ensure_ascii=False))
++            if args.export_config:
++                config_path = plan_to_crawl_config(search_plan, args.export_config)
++                print(f"Wrote collector crawl config: {config_path}")
+         elif args.command == "serve":
+             serve_dashboard(
+                 storage,
+@@ -162,6 +190,28 @@ def main() -> None:
+             storage.close()
+ 
+ 
++def plan_to_crawl_config(plan: SearchPlan, output_path: str) -> Path:
++    """Export a search plan as a crawl config for the project-template Reddit collector.
++
++    This is the bridge that makes plans actionable: the collector runs the planner's
++    queries live and its JSONL output can be ingested back into this system's inbox.
++    """
++
++    slug = slugify(plan.goal)[:40]
++    config = {
++        "product": plan.goal,
++        "queries": [item["query"] for item in plan.queries],
++        "sort": "relevance",
++        "limit_per_query": 20,
++        "output_path": f"data/raw/{slug}.jsonl",
++        "report_path": f"reports/{slug}.md",
++    }
++    path = Path(output_path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
++    return path
++
++
+ def split_csv(value: str) -> list[str]:
+     return [item.strip() for item in value.split(",") if item.strip()]
+ 
+diff --git a/super_crawler/dashboard.py b/super_crawler/dashboard.py
+index 3cff67f..541a4c7 100644
+--- a/super_crawler/dashboard.py
++++ b/super_crawler/dashboard.py
+@@ -304,6 +304,9 @@ def home_page(storage: Storage, controller: RuntimeController) -> str:
+         + runtime_controls(runtime)
+         + resource_allocation_panel(storage)
+         + deep_workers_panel(storage)
++        + "<section class='panel'>"
++        + search_plan_block(storage)
++        + "</section>"
+         + "<section class='grid'>"
+         + "".join(f"<div class='card'><div class='muted'>{label}</div><div class='metric'>{value}</div></div>" for label, value in cards)
+         + "</section>"
+@@ -471,12 +474,49 @@ def task_group_search_panel(storage: Storage, task_group: object) -> str:
+     return (
+         "<section class='panel'><h2>Search Task Group</h2>"
+         + task_group_card(task_group)
++        + search_plan_block(storage, task_group.task_group_id)
+         + "<h3>Search Agent Logs</h3>"
+         + agent_cards(storage, ["discovery", "pool_manager", "change_detection"], task_group.task_group_id)
+         + "</section>"
+     )
+ 
+ 
++def search_plan_block(storage: Storage, task_group_id: str | None = None) -> str:
++    plan = storage.latest_search_plan(task_group_id)
++    if plan is None:
++        return (
++            "<h3>Search Plan</h3><p class='muted'>No plan yet. Generate one: "
++            "<code>python -m super_crawler.cli plan --task-group "
++            + html.escape(task_group_id or "&lt;id&gt;")
++            + "</code></p>"
++        )
++    queries = "".join(
++        f"<div class='summary'>• {html.escape(item['query'])}"
++        + (f" <span class='muted'>— {html.escape(item['rationale'])}</span>" if item.get("rationale") else "")
++        + "</div>"
++        for item in plan.queries[:6]
++    )
++    negative = (
++        f"<div class='summary'>noise filters: {html.escape(', '.join(plan.negative_keywords))}</div>"
++        if plan.negative_keywords
++        else ""
++    )
++    hypotheses = (
++        f"<div class='summary'>verify next: {html.escape('; '.join(plan.validation_hypotheses[:3]))}</div>"
++        if plan.validation_hypotheses
++        else ""
++    )
++    return (
++        "<h3>Search Plan</h3>"
++        f"<div class='summary'><span class='status running'>{html.escape(plan.engine)}</span> "
++        f"{html.escape(plan.created_at)} | dimensions: {html.escape(', '.join(plan.dimensions))}</div>"
++        + queries
++        + negative
++        + hypotheses
++        + f"<div class='muted'>feedback used: {html.escape(plan.feedback_summary[:220])}</div>"
++    )
++
++
+ def waiting_requirements_panel(requirements: list[object]) -> str:
+     items = "".join(requirement_card(item) for item in requirements[:12]) or "<p class='muted'>No found requirement is waiting for verification.</p>"
+     return (
+diff --git a/super_crawler/llm.py b/super_crawler/llm.py
+new file mode 100644
+index 0000000..ff121fd
+--- /dev/null
++++ b/super_crawler/llm.py
+@@ -0,0 +1,81 @@
++"""Optional local-LLM client (Ollama) for the search planner.
++
++Dependency-light by design: stdlib urllib only, no API key, talks to a local
++Ollama server. The rest of the system never *requires* this — every caller must
++catch ``LLMUnavailable`` and fall back to deterministic behavior, so the agent
++keeps running when no model is installed (the deck's reliability bar).
++"""
++
++from __future__ import annotations
++
++import json
++import os
++import urllib.error
++import urllib.request
++from typing import Any
++
++DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
++DEFAULT_MODEL_ENV = "OLLAMA_MODEL"
++
++
++class LLMUnavailable(RuntimeError):
++    """Raised when no usable local model can be reached. Callers must degrade gracefully."""
++
++
++class OllamaClient:
++    def __init__(self, base_url: str = DEFAULT_OLLAMA_URL, model: str | None = None, timeout: float = 120.0):
++        self.base_url = base_url.rstrip("/")
++        self.model = model or os.environ.get(DEFAULT_MODEL_ENV)
++        self.timeout = timeout
++
++    def available_models(self) -> list[str]:
++        try:
++            with urllib.request.urlopen(f"{self.base_url}/api/tags", timeout=5) as response:
++                payload = json.loads(response.read().decode("utf-8"))
++        except (urllib.error.URLError, OSError, ValueError) as exc:
++            raise LLMUnavailable(f"Ollama not reachable at {self.base_url}: {exc}") from exc
++        return [item.get("name", "") for item in payload.get("models", [])]
++
++    def resolve_model(self) -> str:
++        if self.model:
++            return self.model
++        models = self.available_models()
++        if not models:
++            raise LLMUnavailable("Ollama is running but no models are pulled (try: ollama pull qwen2.5:3b)")
++        return models[0]
++
++    def generate_json(self, prompt: str, system: str | None = None) -> dict[str, Any]:
++        """Run one chat turn in JSON mode and parse the result into a dict."""
++
++        model = self.resolve_model()
++        messages = []
++        if system:
++            messages.append({"role": "system", "content": system})
++        messages.append({"role": "user", "content": prompt})
++        body = json.dumps(
++            {"model": model, "messages": messages, "format": "json", "stream": False,
++             "options": {"temperature": 0.2}}
++        ).encode("utf-8")
++        request = urllib.request.Request(
++            f"{self.base_url}/api/chat", data=body, headers={"Content-Type": "application/json"}
++        )
++        try:
++            with urllib.request.urlopen(request, timeout=self.timeout) as response:
++                payload = json.loads(response.read().decode("utf-8"))
++        except (urllib.error.URLError, OSError) as exc:
++            raise LLMUnavailable(f"Ollama call failed: {exc}") from exc
++
++        content = payload.get("message", {}).get("content", "")
++        try:
++            parsed = json.loads(content)
++        except ValueError as exc:
++            raise LLMUnavailable(f"Model returned non-JSON output: {content[:200]}") from exc
++        if not isinstance(parsed, dict):
++            raise LLMUnavailable("Model returned JSON that is not an object")
++        return parsed
++
++    def engine_name(self) -> str:
++        try:
++            return f"ollama:{self.resolve_model()}"
++        except LLMUnavailable:
++            return "ollama:unresolved"
+diff --git a/super_crawler/models.py b/super_crawler/models.py
+index 67e959e..399a6ef 100644
+--- a/super_crawler/models.py
++++ b/super_crawler/models.py
+@@ -146,6 +146,23 @@ class AgentActivityLog:
+     cost_estimate: float
+ 
+ 
++@dataclass(slots=True)
++class SearchPlan:
++    """A planner-produced search strategy (LLM when available, heuristic otherwise)."""
++
++    plan_id: str
++    task_group_id: str | None
++    goal: str
++    engine: str  # e.g. "ollama:qwen2.5:3b" or "heuristic"
++    dimensions: list[str]
++    queries: list[dict[str, str]]  # {"query": ..., "rationale": ...}
++    sources: list[str]
++    negative_keywords: list[str]
++    validation_hypotheses: list[str]
++    feedback_summary: str
++    created_at: str
++
++
+ @dataclass(slots=True)
+ class TaskGroup:
+     task_group_id: str
+diff --git a/super_crawler/storage.py b/super_crawler/storage.py
+index 3d1293c..aa7b26b 100644
+--- a/super_crawler/storage.py
++++ b/super_crawler/storage.py
+@@ -14,6 +14,7 @@ from .models import (
+     RequirementRecord,
+     RequirementStatus,
+     ResearchRun,
++    SearchPlan,
+     TaskGroup,
+     TaskGroupRun,
+     TaskGroupStatus,
+@@ -214,6 +215,20 @@ class Storage:
+                 heartbeat_at TEXT NOT NULL,
+                 last_error TEXT
+             );
++
++            CREATE TABLE IF NOT EXISTS search_plans (
++                plan_id TEXT PRIMARY KEY,
++                task_group_id TEXT,
++                goal TEXT NOT NULL,
++                engine TEXT NOT NULL,
++                dimensions TEXT NOT NULL,
++                queries TEXT NOT NULL,
++                sources TEXT NOT NULL,
++                negative_keywords TEXT NOT NULL,
++                validation_hypotheses TEXT NOT NULL,
++                feedback_summary TEXT NOT NULL,
++                created_at TEXT NOT NULL
++            );
+             """
+         )
+         self._ensure_column("raw_evidence", "task_group_id", "TEXT")
+@@ -391,6 +406,25 @@ class Storage:
+             workers.append(item)
+         return workers
+ 
++    def upsert_search_plan(self, plan: SearchPlan) -> None:
++        self._upsert("search_plans", "plan_id", plan)
++
++    def list_search_plans(self, task_group_id: str | None = None, limit: int = 20) -> list[SearchPlan]:
++        if task_group_id:
++            rows = self.conn.execute(
++                "SELECT * FROM search_plans WHERE task_group_id=? ORDER BY created_at DESC LIMIT ?",
++                (task_group_id, limit),
++            ).fetchall()
++        else:
++            rows = self.conn.execute(
++                "SELECT * FROM search_plans ORDER BY created_at DESC LIMIT ?", (limit,)
++            ).fetchall()
++        return [self._from_row(SearchPlan, row) for row in rows]
++
++    def latest_search_plan(self, task_group_id: str | None = None) -> SearchPlan | None:
++        plans = self.list_search_plans(task_group_id, limit=1)
++        return plans[0] if plans else None
++
+     def _seconds_since(self, iso_timestamp: str) -> float:
+         try:
+             then = datetime.fromisoformat(iso_timestamp)
+@@ -816,6 +850,10 @@ class Storage:
+             "subreddits",
+             "keywords",
+             "negative_keywords",
++            "dimensions",
++            "queries",
++            "sources",
++            "validation_hypotheses",
+         }
+         for field in fields(model):
+             if field.name in json_fields and isinstance(data.get(field.name), str):
+diff --git a/tests/test_planner.py b/tests/test_planner.py
+new file mode 100644
+index 0000000..0810e7c
+--- /dev/null
++++ b/tests/test_planner.py
+@@ -0,0 +1,126 @@
++"""Task B — LLM search planner with deterministic fallback.
++
++Tests use a fake LLM client (no network, no Ollama needed) so they run anywhere.
++The contract under test: plans are produced and persisted with either engine, the
++planner reads deep-research feedback, and an unavailable model degrades to the
++heuristic plan instead of failing.
++"""
++
++from __future__ import annotations
++
++import json
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from super_crawler.agents import DeepResearchAgent, DiscoveryAgent, PoolManagerAgent, SearchPlannerAgent
++from super_crawler.cli import plan_to_crawl_config
++from super_crawler.dashboard import search_plan_block
++from super_crawler.llm import LLMUnavailable
++from super_crawler.seed import SAMPLE_REDDIT_ITEMS
++from super_crawler.storage import Storage
++
++
++class FakeLLM:
++    def __init__(self):
++        self.prompts: list[str] = []
++
++    def generate_json(self, prompt: str, system: str | None = None) -> dict:
++        self.prompts.append(prompt)
++        return {
++            "dimensions": ["tool requests", "complaints"],
++            "queries": [
++                {"query": "is there an app for dog medication schedules", "rationale": "tool request"},
++                "dog medication tracking frustrating",
++            ],
++            "sources": ["r/dogs", "r/AskVet"],
++            "negative_keywords": ["human medication"],
++            "validation_hypotheses": ["owners of multiple pets feel the pain most"],
++        }
++
++    def engine_name(self) -> str:
++        return "fake:test-model"
++
++
++class FailingLLM:
++    def generate_json(self, prompt: str, system: str | None = None) -> dict:
++        raise LLMUnavailable("server down")
++
++    def engine_name(self) -> str:
++        return "fake:down"
++
++
++class PlannerTests(unittest.TestCase):
++    def _storage(self) -> Storage:
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)
++        storage = Storage(Path(directory) / "test.sqlite3")
++        storage.migrate()
++        self.addCleanup(storage.close)
++        return storage
++
++    def test_llm_plan_is_saved_with_engine_and_coerced_queries(self) -> None:
++        storage = self._storage()
++        fake = FakeLLM()
++        plan = SearchPlannerAgent(storage, "planner-1", fake).plan(goal="dog medication tracking")
++
++        saved = storage.latest_search_plan()
++        self.assertIsNotNone(saved)
++        self.assertEqual(saved.plan_id, plan.plan_id)
++        self.assertEqual(saved.engine, "fake:test-model")
++        # Mixed string/dict queries are coerced to {"query", "rationale"} dicts.
++        self.assertTrue(all(isinstance(item, dict) and item.get("query") for item in saved.queries))
++        self.assertEqual(len(saved.queries), 2)
++        self.assertIn("r/dogs", saved.sources)
++
++    def test_feedback_from_deep_research_reaches_the_prompt(self) -> None:
++        storage = self._storage()
++        DiscoveryAgent(storage, "discovery").ingest_reddit_items(SAMPLE_REDDIT_ITEMS)
++        PoolManagerAgent(storage, "pool").reconcile_candidates()
++        while DeepResearchAgent(storage, "worker").run_next() is not None:
++            pass  # research everything so there are real outcomes
++
++        fake = FakeLLM()
++        plan = SearchPlannerAgent(storage, "planner-1", fake).plan(goal="pet care requirements")
++
++        self.assertIn("outcomes so far", plan.feedback_summary)
++        self.assertIn("outcomes so far", fake.prompts[0])  # feedback is in the LLM prompt
++
++    def test_unavailable_llm_falls_back_to_heuristic_plan(self) -> None:
++        storage = self._storage()
++        plan = SearchPlannerAgent(storage, "planner-1", FailingLLM()).plan(goal="dog medication tracking")
++
++        self.assertEqual(plan.engine, "heuristic")
++        self.assertTrue(plan.queries)
++        self.assertIsNotNone(storage.latest_search_plan())
++
++    def test_no_client_also_falls_back(self) -> None:
++        storage = self._storage()
++        plan = SearchPlannerAgent(storage, "planner-1", client=None).plan(goal="anything")
++        self.assertEqual(plan.engine, "heuristic")
++
++    def test_plan_exports_collector_crawl_config(self) -> None:
++        storage = self._storage()
++        plan = SearchPlannerAgent(storage, "planner-1", FakeLLM()).plan(goal="dog medication tracking")
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)
++
++        path = plan_to_crawl_config(plan, str(Path(directory) / "cfg.json"))
++        config = json.loads(Path(path).read_text(encoding="utf-8"))
++
++        self.assertEqual(config["product"], "dog medication tracking")
++        self.assertIn("is there an app for dog medication schedules", config["queries"])
++        self.assertTrue(config["output_path"].endswith(".jsonl"))
++
++    def test_dashboard_block_renders_plan(self) -> None:
++        storage = self._storage()
++        SearchPlannerAgent(storage, "planner-1", FakeLLM()).plan(goal="dog medication tracking")
++        html = search_plan_block(storage)
++        self.assertIn("Search Plan", html)
++        self.assertIn("fake:test-model", html)
++        self.assertIn("is there an app for dog medication schedules", html)
++
++
++if __name__ == "__main__":
++    unittest.main()

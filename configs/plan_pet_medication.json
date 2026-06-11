@@ -1,0 +1,16 @@
+{
+  "product": "pet medication tracking for dog owners",
+  "queries": [
+    "need help tracking dog medication schedule",
+    "dog meds reminder app missing features",
+    "how to organize daily dog medicine dosages",
+    "pet med tracker alternative to existing apps",
+    "dog owner struggles with meds schedule",
+    "need a better way to track my dog's meds",
+    "dog owner needs help with meds schedule"
+  ],
+  "sort": "relevance",
+  "limit_per_query": 20,
+  "output_path": "data/raw/pet_medication_tracking_for_dog_owners.jsonl",
+  "report_path": "reports/pet_medication_tracking_for_dog_owners.md"
+}
