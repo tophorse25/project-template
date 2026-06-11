@@ -23,6 +23,16 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-11: Intern Task E — Evaluation Metrics (speed / cost / relevance / validated rate)
+
+- Added `metrics.py` on branch `intern/task-e-metrics`: all four metric families computed from
+  data the system already records (no separate bookkeeping). Dashboard "Evaluation Metrics"
+  panel + `/api/metrics` endpoint + `cli metrics` command; planner now times its LLM calls
+  (`SearchPlan.llm_seconds`, back-filled column).
+- Live at delivery: validated rate 0.2 (1/5 researched), signal 0.4 / noise 0.6, discovery
+  yield 0.318, LLM compute 3.68 s. 5 new tests; full reference suite 32/32 green.
+- Intern tasks complete: C, A, deploy, B (+ closed loop), E. Remaining: D (evidence page port).
+
 ## 2026-06-11: Closed the Loop — First Validated Requirement End to End
 
 - Ran the full pipeline live for the first time: LLM plan (qwen2.5:3b) → live Reddit crawl

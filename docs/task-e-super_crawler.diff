@@ -1,0 +1,385 @@
+diff --git a/super_crawler/agents.py b/super_crawler/agents.py
+index db54e55..a11eb17 100644
+--- a/super_crawler/agents.py
++++ b/super_crawler/agents.py
+@@ -3,6 +3,7 @@ from __future__ import annotations
+ import hashlib
+ from collections import Counter
+ from statistics import mean
++from time import perf_counter
+ from typing import Any
+ 
+ from .llm import LLMUnavailable
+@@ -437,8 +438,10 @@ class SearchPlannerAgent(BaseAgent):
+         try:
+             if self.client is None:
+                 raise LLMUnavailable("no LLM client configured")
++            llm_started = perf_counter()
+             raw = self.client.generate_json(self._prompt(goal_text, task_group, feedback), system=_PLANNER_SYSTEM)
+             plan = self._coerce(raw, goal_text, task_group, feedback, engine=self.client.engine_name())
++            plan.llm_seconds = round(perf_counter() - llm_started, 2)
+             self.log("plan", "completed", [task_group.task_group_id] if task_group else [], [plan.plan_id])
+         except LLMUnavailable as exc:
+             plan = self._heuristic_plan(goal_text, task_group, feedback)
+diff --git a/super_crawler/cli.py b/super_crawler/cli.py
+index e333c03..e7e5a2f 100644
+--- a/super_crawler/cli.py
++++ b/super_crawler/cli.py
+@@ -16,6 +16,7 @@ from .agents import (
+ )
+ from .dashboard import serve_dashboard
+ from .llm import DEFAULT_OLLAMA_URL, OllamaClient
++from .metrics import compute_metrics
+ from .models import RequirementStatus, SearchPlan, TaskGroupStatus, TaskGroupType
+ from .runner import AlwaysOnRunner
+ from .seed import SAMPLE_REDDIT_ITEMS
+@@ -69,6 +70,8 @@ def main() -> None:
+     report = subcommands.add_parser("report", help="Generate a daily report")
+     report.add_argument("--out", default="reports/daily.md", help="Markdown output path")
+ 
++    subcommands.add_parser("metrics", help="Print speed/cost/relevance/validated-rate metrics as JSON")
++
+     plan = subcommands.add_parser("plan", help="Generate a search plan (uses local Ollama LLM when available)")
+     plan.add_argument("--task-group", help="Plan for an existing task group id")
+     plan.add_argument("--goal", help="Free-form research goal when no task group is given")
+@@ -165,6 +168,8 @@ def main() -> None:
+             output.parent.mkdir(parents=True, exist_ok=True)
+             output.write_text(ReportAgent(storage, "report-agent").daily_report(), encoding="utf-8")
+             print(f"Wrote {output}")
++        elif args.command == "metrics":
++            print(json.dumps(compute_metrics(storage), indent=2, ensure_ascii=False))
+         elif args.command == "plan":
+             task_group = storage.get_task_group(args.task_group) if args.task_group else None
+             if args.task_group and task_group is None:
+diff --git a/super_crawler/dashboard.py b/super_crawler/dashboard.py
+index 541a4c7..6941251 100644
+--- a/super_crawler/dashboard.py
++++ b/super_crawler/dashboard.py
+@@ -6,6 +6,7 @@ from dataclasses import asdict
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, urlparse
+ 
++from .metrics import compute_metrics
+ from .models import RequirementStatus, TaskGroupStatus, TaskGroupType
+ from .runtime import RuntimeController
+ from .storage import Storage
+@@ -99,6 +100,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
+                     self._html(reports_page(storage))
+                 elif parsed.path == "/api/requirements":
+                     self._json([asdict(requirement) for requirement in storage.list_requirements()])
++                elif parsed.path == "/api/metrics":
++                    self._json(compute_metrics(storage))
+                 elif parsed.path == "/action":
+                     self._handle_action(storage, parse_qs(parsed.query))
+                 elif parsed.path == "/task":
+@@ -304,6 +307,7 @@ def home_page(storage: Storage, controller: RuntimeController) -> str:
+         + runtime_controls(runtime)
+         + resource_allocation_panel(storage)
+         + deep_workers_panel(storage)
++        + metrics_panel(storage)
+         + "<section class='panel'>"
+         + search_plan_block(storage)
+         + "</section>"
+@@ -358,6 +362,38 @@ def resource_allocation_panel(storage: Storage) -> str:
+     """
+ 
+ 
++def metrics_panel(storage: Storage) -> str:
++    """Task E: speed / cost / relevance / validated-rate at a glance (full data at /api/metrics)."""
++
++    metrics = compute_metrics(storage)
++    speed, cost = metrics["speed"], metrics["cost"]
++    relevance, validated = metrics["relevance"], metrics["validated_rate"]
++
++    def fmt(value, suffix=""):
++        return "—" if value is None else f"{value}{suffix}"
++
++    cards = [
++        ("Avg cycle", fmt(speed["avg_cycle_seconds"], "s"), f"{speed['cycles']} cycle(s)"),
++        ("LLM compute", fmt(cost["llm_seconds_total"], "s"), f"{cost['llm_plan_calls']} plan call(s)"),
++        ("Signal rate", fmt(relevance["signal_rate"]), f"noise {fmt(relevance['noise_rate'])} of {relevance['researched']} researched"),
++        ("Validated rate", fmt(validated["rate"]), f"{validated['validated']} validated / {validated['researched']} researched"),
++    ]
++    cards_html = "".join(
++        f"<div class='card'><div class='muted'>{html.escape(label)}</div>"
++        f"<div class='metric'>{html.escape(str(value))}</div>"
++        f"<div class='summary'>{html.escape(detail)}</div></div>"
++        for label, value, detail in cards
++    )
++    yield_text = fmt(relevance["discovery_yield"])
++    return (
++        "<section class='panel'><h2>Evaluation Metrics</h2>"
++        f"<section class='grid'>{cards_html}</section>"
++        f"<div class='summary'>discovery yield (candidates / items, recent cycles): {html.escape(str(yield_text))} "
++        f"| full detail: <a href='/api/metrics'>/api/metrics</a></div>"
++        "</section>"
++    )
++
++
+ def deep_workers_panel(storage: Storage, stale_after_seconds: float = 300.0) -> str:
+     """Real worker state: stage, current requirement, heartbeat age.
+ 
+diff --git a/super_crawler/metrics.py b/super_crawler/metrics.py
+new file mode 100644
+index 0000000..136d8ee
+--- /dev/null
++++ b/super_crawler/metrics.py
+@@ -0,0 +1,108 @@
++"""Task E - evaluation metrics: speed, cost, relevance, validated rate.
++
++Everything is computed from data the system already records (pipeline runs,
++research runs, requirement statuses, search plans, activity logs) - no separate
++bookkeeping to keep in sync. Local LLM cost is reported as compute seconds and
++call counts, not dollars: that is the honest unit for an on-device model.
++"""
++
++from __future__ import annotations
++
++from datetime import datetime
++from typing import Any
++
++from .models import RequirementStatus
++from .storage import Storage
++
++
++def _seconds_between(started_at: str | None, completed_at: str | None) -> float | None:
++    if not started_at or not completed_at:
++        return None
++    try:
++        start = datetime.fromisoformat(started_at)
++        end = datetime.fromisoformat(completed_at)
++    except ValueError:
++        return None
++    return max((end - start).total_seconds(), 0.0)
++
++
++def _round(value: float | None, digits: int = 2) -> float | None:
++    return None if value is None else round(value, digits)
++
++
++def compute_metrics(storage: Storage) -> dict[str, Any]:
++    pipelines = storage.list_pipeline_runs(limit=200)
++    research_runs = storage.list_research_runs()
++    requirements = storage.list_requirements()
++    plans = storage.list_search_plans(limit=200)
++
++    # --- speed ---------------------------------------------------------------
++    cycle_durations = [d for run in pipelines if (d := _seconds_between(run.get("started_at"), run.get("completed_at"))) is not None]
++    research_durations = [d for run in research_runs if (d := _seconds_between(run.started_at, run.completed_at)) is not None]
++    speed = {
++        "cycles": len(pipelines),
++        "avg_cycle_seconds": _round(sum(cycle_durations) / len(cycle_durations)) if cycle_durations else None,
++        "last_cycle_seconds": _round(cycle_durations[0]) if cycle_durations else None,
++        "research_runs": len(research_runs),
++        "avg_research_seconds": _round(sum(research_durations) / len(research_durations)) if research_durations else None,
++    }
++
++    # --- cost ----------------------------------------------------------------
++    llm_plans = [plan for plan in plans if plan.engine.startswith("ollama")]
++    heuristic_plans = [plan for plan in plans if plan.engine == "heuristic"]
++    activity_cost = 0.0
++    for log in storage.list_activity_logs(limit=1000):
++        activity_cost += float(log.get("cost_estimate") or 0.0)
++    cost = {
++        "llm_plan_calls": len(llm_plans),
++        "llm_seconds_total": _round(sum(getattr(plan, "llm_seconds", 0.0) for plan in llm_plans)),
++        "heuristic_plan_calls": len(heuristic_plans),
++        "agent_cost_estimate_total": _round(activity_cost),
++        "note": "local model: cost is compute seconds, not dollars",
++    }
++
++    # --- relevance -----------------------------------------------------------
++    items_seen = 0
++    candidates_created = 0
++    per_cycle: list[dict[str, Any]] = []
++    for run in pipelines[:10]:
++        result = run.get("result") or {}
++        items = int(result.get("items_loaded") or 0)
++        cands = int(result.get("candidates") or 0)
++        items_seen += items
++        candidates_created += cands
++        per_cycle.append(
++            {
++                "at": run.get("completed_at"),
++                "items_loaded": items,
++                "candidates": cands,
++                "seconds": _round(_seconds_between(run.get("started_at"), run.get("completed_at"))),
++            }
++        )
++
++    by_status = {status.value: 0 for status in RequirementStatus}
++    for requirement in requirements:
++        by_status[requirement.status.value] = by_status.get(requirement.status.value, 0) + 1
++    researched = [r for r in requirements if r.research_history]
++    rejected = sum(1 for r in researched if r.status == RequirementStatus.REJECTED)
++    signal = sum(1 for r in researched if r.status in {RequirementStatus.VALIDATED, RequirementStatus.WATCHING})
++    relevance = {
++        "items_seen_recent": items_seen,
++        "candidates_recent": candidates_created,
++        "discovery_yield": _round(candidates_created / items_seen, 3) if items_seen else None,
++        "researched": len(researched),
++        "noise_rate": _round(rejected / len(researched), 3) if researched else None,
++        "signal_rate": _round(signal / len(researched), 3) if researched else None,
++        "by_status": {status: count for status, count in by_status.items() if count},
++        "recent_cycles": per_cycle,
++    }
++
++    # --- validated rate --------------------------------------------------------
++    validated = by_status.get(RequirementStatus.VALIDATED.value, 0)
++    validated_rate = {
++        "validated": validated,
++        "researched": len(researched),
++        "rate": _round(validated / len(researched), 3) if researched else None,
++    }
++
++    return {"speed": speed, "cost": cost, "relevance": relevance, "validated_rate": validated_rate}
+diff --git a/super_crawler/models.py b/super_crawler/models.py
+index 399a6ef..a8c907b 100644
+--- a/super_crawler/models.py
++++ b/super_crawler/models.py
+@@ -161,6 +161,7 @@ class SearchPlan:
+     validation_hypotheses: list[str]
+     feedback_summary: str
+     created_at: str
++    llm_seconds: float = 0.0
+ 
+ 
+ @dataclass(slots=True)
+diff --git a/super_crawler/storage.py b/super_crawler/storage.py
+index aa7b26b..b8bf4df 100644
+--- a/super_crawler/storage.py
++++ b/super_crawler/storage.py
+@@ -227,7 +227,8 @@ class Storage:
+                 negative_keywords TEXT NOT NULL,
+                 validation_hypotheses TEXT NOT NULL,
+                 feedback_summary TEXT NOT NULL,
+-                created_at TEXT NOT NULL
++                created_at TEXT NOT NULL,
++                llm_seconds REAL NOT NULL DEFAULT 0
+             );
+             """
+         )
+@@ -237,6 +238,7 @@ class Storage:
+         self._ensure_column("candidate_requirements", "task_group_run_id", "TEXT")
+         self._ensure_column("requirements", "task_group_ids", "TEXT NOT NULL DEFAULT '[]'")
+         self._ensure_column("requirements", "task_group_run_ids", "TEXT NOT NULL DEFAULT '[]'")
++        self._ensure_column("search_plans", "llm_seconds", "REAL NOT NULL DEFAULT 0")
+         self._ensure_default_resource_config()
+         self.conn.commit()
+ 
+diff --git a/tests/test_metrics.py b/tests/test_metrics.py
+new file mode 100644
+index 0000000..332e7c4
+--- /dev/null
++++ b/tests/test_metrics.py
+@@ -0,0 +1,110 @@
++"""Task E - evaluation metrics: speed, cost, relevance, validated rate."""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from super_crawler.agents import DeepResearchAgent, DiscoveryAgent, PoolManagerAgent, SearchPlannerAgent
++from super_crawler.dashboard import metrics_panel
++from super_crawler.metrics import compute_metrics
++from super_crawler.models import SearchPlan
++from super_crawler.seed import SAMPLE_REDDIT_ITEMS
++from super_crawler.storage import Storage
++
++
++def make_plan(plan_id: str, engine: str, llm_seconds: float) -> SearchPlan:
++    return SearchPlan(
++        plan_id=plan_id,
++        task_group_id=None,
++        goal="test goal",
++        engine=engine,
++        dimensions=["d"],
++        queries=[{"query": "q", "rationale": ""}],
++        sources=[],
++        negative_keywords=[],
++        validation_hypotheses=[],
++        feedback_summary="",
++        created_at="2026-06-11T00:00:00+00:00",
++        llm_seconds=llm_seconds,
++    )
++
++
++class MetricsTests(unittest.TestCase):
++    def _storage(self) -> Storage:
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)
++        storage = Storage(Path(directory) / "test.sqlite3")
++        storage.migrate()
++        self.addCleanup(storage.close)
++        return storage
++
++    def _seed_and_research(self, storage: Storage) -> None:
++        DiscoveryAgent(storage, "discovery").ingest_reddit_items(SAMPLE_REDDIT_ITEMS)
++        PoolManagerAgent(storage, "pool").reconcile_candidates()
++        while DeepResearchAgent(storage, "worker").run_next() is not None:
++            pass
++
++    def test_validated_rate_and_relevance_from_requirement_outcomes(self) -> None:
++        storage = self._storage()
++        self._seed_and_research(storage)
++
++        metrics = compute_metrics(storage)
++
++        researched = metrics["validated_rate"]["researched"]
++        self.assertGreater(researched, 0)
++        rate = metrics["validated_rate"]["rate"]
++        self.assertTrue(0.0 <= rate <= 1.0)
++        # noise + signal account for all researched outcomes (statuses are exhaustive here)
++        noise = metrics["relevance"]["noise_rate"] or 0.0
++        signal = metrics["relevance"]["signal_rate"] or 0.0
++        self.assertAlmostEqual(noise + signal, 1.0, places=2)
++
++    def test_speed_uses_pipeline_timestamps(self) -> None:
++        storage = self._storage()
++        storage.save_pipeline_run(
++            pipeline_run_id="pipe_1",
++            started_at="2026-06-11T00:00:00+00:00",
++            completed_at="2026-06-11T00:01:00+00:00",
++            status="completed",
++            result={"items_loaded": 10, "candidates": 4},
++            summary="test",
++        )
++
++        metrics = compute_metrics(storage)
++
++        self.assertEqual(metrics["speed"]["cycles"], 1)
++        self.assertEqual(metrics["speed"]["avg_cycle_seconds"], 60.0)
++        self.assertEqual(metrics["relevance"]["discovery_yield"], 0.4)
++
++    def test_cost_aggregates_llm_seconds_from_plans(self) -> None:
++        storage = self._storage()
++        storage.upsert_search_plan(make_plan("p1", "ollama:qwen2.5:3b", 12.5))
++        storage.upsert_search_plan(make_plan("p2", "ollama:qwen2.5:3b", 7.5))
++        storage.upsert_search_plan(make_plan("p3", "heuristic", 0.0))
++
++        cost = compute_metrics(storage)["cost"]
++
++        self.assertEqual(cost["llm_plan_calls"], 2)
++        self.assertEqual(cost["llm_seconds_total"], 20.0)
++        self.assertEqual(cost["heuristic_plan_calls"], 1)
++
++    def test_heuristic_plan_records_zero_llm_seconds(self) -> None:
++        storage = self._storage()
++        plan = SearchPlannerAgent(storage, "planner", client=None).plan(goal="anything")
++        self.assertEqual(plan.llm_seconds, 0.0)
++
++    def test_dashboard_panel_renders_metric_cards(self) -> None:
++        storage = self._storage()
++        self._seed_and_research(storage)
++        html = metrics_panel(storage)
++        self.assertIn("Evaluation Metrics", html)
++        self.assertIn("Validated rate", html)
++        self.assertIn("Signal rate", html)
++        self.assertIn("/api/metrics", html)
++
++
++if __name__ == "__main__":
++    unittest.main()
