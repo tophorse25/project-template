@@ -1,0 +1,370 @@
+diff --git a/super_crawler/cli.py b/super_crawler/cli.py
+index e7e5a2f..efc10a1 100644
+--- a/super_crawler/cli.py
++++ b/super_crawler/cli.py
+@@ -14,6 +14,7 @@ from .agents import (
+     ReportAgent,
+     SearchPlannerAgent,
+ )
++from .client_report import render_client_overview, render_client_page
+ from .dashboard import serve_dashboard
+ from .llm import DEFAULT_OLLAMA_URL, OllamaClient
+ from .metrics import compute_metrics
+@@ -72,6 +73,10 @@ def main() -> None:
+ 
+     subcommands.add_parser("metrics", help="Print speed/cost/relevance/validated-rate metrics as JSON")
+ 
++    client_report = subcommands.add_parser("client-report", help="Export a customer-readable opportunity brief as standalone HTML")
++    client_report.add_argument("--requirement", help="Requirement id for a single brief (omit for the overview page)")
++    client_report.add_argument("--out", default="reports/client-report.html", help="HTML output path")
++
+     plan = subcommands.add_parser("plan", help="Generate a search plan (uses local Ollama LLM when available)")
+     plan.add_argument("--task-group", help="Plan for an existing task group id")
+     plan.add_argument("--goal", help="Free-form research goal when no task group is given")
+@@ -170,6 +175,16 @@ def main() -> None:
+             print(f"Wrote {output}")
+         elif args.command == "metrics":
+             print(json.dumps(compute_metrics(storage), indent=2, ensure_ascii=False))
++        elif args.command == "client-report":
++            document = (
++                render_client_page(storage, args.requirement)
++                if args.requirement
++                else render_client_overview(storage)
++            )
++            output = Path(args.out)
++            output.parent.mkdir(parents=True, exist_ok=True)
++            output.write_text(document, encoding="utf-8")
++            print(f"Wrote {output}")
+         elif args.command == "plan":
+             task_group = storage.get_task_group(args.task_group) if args.task_group else None
+             if args.task_group and task_group is None:
+diff --git a/super_crawler/client_report.py b/super_crawler/client_report.py
+new file mode 100644
+index 0000000..e709e1f
+--- /dev/null
++++ b/super_crawler/client_report.py
+@@ -0,0 +1,187 @@
++"""Task D - customer-readable opportunity briefs.
++
++Turns a researched requirement into a page a non-technical client can read:
++what people are asking for, the evidence, why it may be real, why it may be
++noise, what users do today, where the demand is, and the suggested next step.
++Plain language only - no agent ids, queue states, or internal jargon.
++
++Pages are fully self-contained HTML (inline CSS), so the CLI can export a
++single file that survives email/Slack without the dashboard running.
++"""
++
++from __future__ import annotations
++
++import html
++from typing import Any
++
++from .models import RequirementRecord, RequirementStatus, ResearchRun
++from .storage import Storage
++
++_CSS = """
++body { margin: 0; font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++       color: #1f2933; background: #f7f8fa; }
++main { max-width: 880px; margin: 0 auto; padding: 28px 22px 60px; }
++h1 { font-size: 26px; margin: 0 0 6px; }
++h2 { font-size: 17px; margin: 26px 0 8px; }
++.sub { color: #5f6b76; margin-bottom: 18px; }
++.verdict { display: inline-block; padding: 4px 12px; border-radius: 999px; font-weight: 600; font-size: 14px; }
++.v-validated { background: #d7f2dd; color: #1e6b34; }
++.v-watching { background: #fdf0cd; color: #8a6207; }
++.v-rejected { background: #f0f1f3; color: #5f6b76; }
++.v-open { background: #dde8fb; color: #1d4f9c; }
++.card { background: white; border: 1px solid #dfe4ea; border-radius: 10px; padding: 16px 18px; margin: 10px 0; }
++.stats { display: flex; gap: 22px; flex-wrap: wrap; }
++.stats div { min-width: 110px; }
++.stats .n { font-size: 22px; font-weight: 700; }
++.stats .l { color: #5f6b76; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
++ul { margin: 6px 0; padding-left: 20px; }
++li { margin: 4px 0; }
++a { color: #1d5fb4; text-decoration: none; }
++.muted { color: #5f6b76; font-size: 13px; }
++.brief { display: block; color: inherit; }
++.brief:hover { border-color: #9fb3c8; }
++footer { color: #5f6b76; font-size: 13px; margin-top: 34px; border-top: 1px solid #dfe4ea; padding-top: 14px; }
++"""
++
++_VERDICTS: dict[RequirementStatus, tuple[str, str]] = {
++    RequirementStatus.VALIDATED: ("Real demand — worth acting on", "v-validated"),
++    RequirementStatus.WATCHING: ("Promising — keep watching", "v-watching"),
++    RequirementStatus.REJECTED: ("Not enough evidence — likely noise", "v-rejected"),
++}
++
++
++def _verdict(status: RequirementStatus) -> tuple[str, str]:
++    return _VERDICTS.get(status, ("Still being investigated", "v-open"))
++
++
++def _e(value: Any) -> str:
++    return html.escape(str(value), quote=True)
++
++
++def _document(title: str, body: str) -> str:
++    return (
++        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
++        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
++        f"<title>{_e(title)}</title><style>{_CSS}</style></head>"
++        f"<body><main>{body}</main></body></html>"
++    )
++
++
++def _plain_title(requirement: RequirementRecord) -> str:
++    # Strip the generator's boilerplate prefix; clients should read the substance.
++    return requirement.canonical_requirement.removeprefix("Users need a better way to handle ").strip().capitalize()
++
++
++def render_client_page(storage: Storage, requirement_id: str) -> str:
++    requirement = storage.get_requirement(requirement_id)
++    if requirement is None:
++        return _document("Not found", "<h1>Report not found</h1><p class='muted'>Unknown requirement.</p>")
++    runs = storage.list_research_runs(requirement_id)
++    run: ResearchRun | None = runs[0] if runs else None
++    evidence = storage.list_evidence(requirement.evidence_ids)
++    evidence.sort(key=lambda item: (item.score or 0) + (item.comment_count or 0), reverse=True)
++
++    verdict_text, verdict_class = _verdict(requirement.status)
++    findings: dict[str, Any] = run.findings if run else {}
++    parts: list[str] = []
++
++    parts.append(f"<h1>{_e(_plain_title(requirement))}</h1>")
++    parts.append(
++        f"<div class='sub'><span class='verdict {verdict_class}'>{_e(verdict_text)}</span> "
++        f"&nbsp;first seen {_e(requirement.first_seen[:10])} · last seen {_e(requirement.last_seen[:10])}</div>"
++    )
++
++    parts.append("<div class='card'><div class='stats'>")
++    for number, label in [
++        (requirement.evidence_count, "pieces of evidence"),
++        (requirement.subreddit_count, "communities"),
++        (requirement.times_detected, "times detected"),
++        (requirement.current_scores.get("overall_score", 0), "demand score"),
++    ]:
++        parts.append(f"<div><div class='n'>{_e(number)}</div><div class='l'>{_e(label)}</div></div>")
++    parts.append("</div></div>")
++
++    if findings.get("why_real"):
++        parts.append("<h2>Why we believe this is real</h2>")
++        parts.append(f"<div class='card'>{_e(findings['why_real'])}</div>")
++
++    why_noise = findings.get("why_noise")
++    if why_noise:
++        items = why_noise if isinstance(why_noise, list) else [why_noise]
++        parts.append("<h2>Why it could still be noise</h2><div class='card'><ul>")
++        parts.extend(f"<li>{_e(item)}</li>" for item in items)
++        parts.append("</ul></div>")
++
++    solutions = (run.existing_solution_analysis or {}).get("existing_solutions") if run else None
++    if solutions:
++        parts.append("<h2>What people use today</h2>")
++        parts.append("<div class='card'>" + ", ".join(_e(s) for s in solutions) + "</div>")
++
++    wtp = findings.get("willingness_to_pay_signals")
++    if wtp:
++        parts.append("<h2>Willingness-to-pay language seen</h2>")
++        parts.append("<div class='card'>" + ", ".join(_e(s) for s in wtp) + "</div>")
++
++    if requirement.geo_distribution:
++        parts.append("<h2>Where the demand appears</h2><div class='card'><ul>")
++        for row in requirement.geo_distribution:
++            parts.append(
++                f"<li>{_e(row.get('region'))} — {_e(row.get('evidence_count'))} mention(s), "
++                f"confidence {_e(row.get('confidence'))}</li>"
++            )
++        parts.append("</ul></div>")
++
++    product_opps = findings.get("product_opportunities") or []
++    content_opps = findings.get("content_opportunities") or []
++    if product_opps or content_opps:
++        parts.append("<h2>Opportunities</h2><div class='card'><ul>")
++        parts.extend(f"<li>{_e(item)}</li>" for item in list(product_opps) + list(content_opps))
++        parts.append("</ul></div>")
++
++    next_step = findings.get("suggested_next_validation_step") or requirement.latest_recommendation
++    if next_step:
++        parts.append("<h2>Suggested next step</h2>")
++        parts.append(f"<div class='card'><strong>{_e(next_step)}</strong></div>")
++
++    if evidence:
++        parts.append("<h2>Source evidence</h2><div class='card'><ul>")
++        for item in evidence[:12]:
++            label = item.title or (item.body[:90] + "…" if len(item.body) > 90 else item.body) or "Untitled post"
++            community = f" <span class='muted'>({_e(item.subreddit)})</span>" if item.subreddit else ""
++            parts.append(f"<li><a href='{_e(item.source_url)}' target='_blank' rel='noopener'>{_e(label)}</a>{community}</li>")
++        if len(evidence) > 12:
++            parts.append(f"<li class='muted'>… and {len(evidence) - 12} more</li>")
++        parts.append("</ul></div>")
++
++    limitations = run.limitations if run else []
++    parts.append("<footer>")
++    if limitations:
++        parts.append("Limitations: " + " ".join(_e(item) for item in limitations) + "<br>")
++    parts.append("Every conclusion above links back to its source evidence. "
++                 "Generated automatically by the requirement-discovery agent.</footer>")
++
++    return _document(_plain_title(requirement), "".join(parts))
++
++
++def render_client_overview(storage: Storage) -> str:
++    requirements = [r for r in storage.list_requirements() if r.research_history]
++    order = {RequirementStatus.VALIDATED: 0, RequirementStatus.WATCHING: 1}
++    requirements.sort(
++        key=lambda r: (order.get(r.status, 2), -float(r.current_scores.get("overall_score", 0)))
++    )
++
++    parts = ["<h1>Opportunity reports</h1>",
++             "<div class='sub'>Every researched requirement, strongest first. Click through for full evidence.</div>"]
++    if not requirements:
++        parts.append("<div class='card muted'>Nothing researched yet — reports appear after the first deep-research cycle.</div>")
++    for requirement in requirements:
++        verdict_text, verdict_class = _verdict(requirement.status)
++        parts.append(
++            f"<a class='card brief' href='/client-report?id={_e(requirement.requirement_id)}'>"
++            f"<span class='verdict {verdict_class}'>{_e(verdict_text)}</span><br>"
++            f"<strong>{_e(_plain_title(requirement))}</strong><br>"
++            f"<span class='muted'>{requirement.evidence_count} evidence · {requirement.subreddit_count} communities · "
++            f"score {_e(requirement.current_scores.get('overall_score', 0))}</span></a>"
++        )
++    parts.append("<footer>Generated automatically by the requirement-discovery agent.</footer>")
++    return _document("Opportunity reports", "".join(parts))
+diff --git a/super_crawler/dashboard.py b/super_crawler/dashboard.py
+index 6941251..20c9ad4 100644
+--- a/super_crawler/dashboard.py
++++ b/super_crawler/dashboard.py
+@@ -6,6 +6,7 @@ from dataclasses import asdict
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, urlparse
+ 
++from .client_report import render_client_overview, render_client_page
+ from .metrics import compute_metrics
+ from .models import RequirementStatus, TaskGroupStatus, TaskGroupType
+ from .runtime import RuntimeController
+@@ -102,6 +103,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
+                     self._json([asdict(requirement) for requirement in storage.list_requirements()])
+                 elif parsed.path == "/api/metrics":
+                     self._json(compute_metrics(storage))
++                elif parsed.path == "/client-report":
++                    requirement_id = parse_qs(parsed.query).get("id", [""])[0]
++                    if requirement_id:
++                        self._page(render_client_page(storage, requirement_id))
++                    else:
++                        self._page(render_client_overview(storage))
+                 elif parsed.path == "/action":
+                     self._handle_action(storage, parse_qs(parsed.query))
+                 elif parsed.path == "/task":
+@@ -122,6 +129,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
+         self.end_headers()
+         self.wfile.write(content)
+ 
++    def _page(self, document: str) -> None:
++        """Serve an already-complete standalone HTML document (no dashboard chrome)."""
++        content = document.encode()
++        self.send_response(200)
++        self.send_header("Content-Type", "text/html; charset=utf-8")
++        self.send_header("Content-Length", str(len(content)))
++        self.end_headers()
++        self.wfile.write(content)
++
+     def _json(self, data: object) -> None:
+         content = json.dumps(data, default=str).encode()
+         self.send_response(200)
+@@ -280,6 +296,7 @@ def layout(content: str) -> str:
+     <a href="/">Running Status</a>
+     <a href="/possible">Possible Requirements</a>
+     <a href="/rejected">Rejected Requirements</a>
++    <a href="/client-report">Client Reports</a>
+   </header>
+   <main>{content}</main>
+ </body>
+diff --git a/tests/test_client_report.py b/tests/test_client_report.py
+new file mode 100644
+index 0000000..e163587
+--- /dev/null
++++ b/tests/test_client_report.py
+@@ -0,0 +1,82 @@
++"""Task D - customer-readable opportunity briefs."""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from super_crawler.agents import DeepResearchAgent, DiscoveryAgent, PoolManagerAgent
++from super_crawler.client_report import render_client_overview, render_client_page
++from super_crawler.models import RequirementStatus
++from super_crawler.seed import SAMPLE_REDDIT_ITEMS
++from super_crawler.storage import Storage
++
++
++class ClientReportTests(unittest.TestCase):
++    def _storage(self) -> Storage:
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)
++        storage = Storage(Path(directory) / "test.sqlite3")
++        storage.migrate()
++        self.addCleanup(storage.close)
++        return storage
++
++    def _seed_and_research(self, storage: Storage) -> list:
++        DiscoveryAgent(storage, "discovery").ingest_reddit_items(SAMPLE_REDDIT_ITEMS)
++        PoolManagerAgent(storage, "pool").reconcile_candidates()
++        while DeepResearchAgent(storage, "worker").run_next() is not None:
++            pass
++        return storage.list_requirements()
++
++    def test_single_brief_has_all_customer_sections(self) -> None:
++        storage = self._storage()
++        requirements = self._seed_and_research(storage)
++        researched = next(r for r in requirements if r.research_history)
++
++        page = render_client_page(storage, researched.requirement_id)
++
++        self.assertTrue(page.startswith("<!doctype html>"))
++        for section in ["Why we believe this is real", "Suggested next step", "Source evidence", "Limitations"]:
++            self.assertIn(section, page)
++        self.assertIn("https://reddit.com", page)  # evidence links survive
++        # No internal jargon on a customer page.
++        for jargon in ["queued_for_research", "candidate_id", "agent_id", "Pool Manager"]:
++            self.assertNotIn(jargon, page)
++
++    def test_verdict_language_is_plain(self) -> None:
++        storage = self._storage()
++        requirements = self._seed_and_research(storage)
++        rejected = next((r for r in requirements if r.status == RequirementStatus.REJECTED), None)
++        if rejected is None:
++            self.skipTest("no rejected requirement in seed outcomes")
++        page = render_client_page(storage, rejected.requirement_id)
++        self.assertIn("Not enough evidence", page)
++
++    def test_overview_lists_researched_requirements_with_links(self) -> None:
++        storage = self._storage()
++        requirements = self._seed_and_research(storage)
++        researched = [r for r in requirements if r.research_history]
++
++        page = render_client_overview(storage)
++
++        self.assertIn("Opportunity reports", page)
++        for requirement in researched:
++            self.assertIn(f"/client-report?id={requirement.requirement_id}", page)
++
++    def test_unknown_requirement_renders_not_found(self) -> None:
++        storage = self._storage()
++        page = render_client_page(storage, "REQ-NOPE")
++        self.assertIn("Report not found", page)
++
++    def test_boilerplate_title_prefix_is_stripped(self) -> None:
++        storage = self._storage()
++        requirements = self._seed_and_research(storage)
++        researched = next(r for r in requirements if r.research_history)
++        page = render_client_page(storage, researched.requirement_id)
++        self.assertNotIn("Users need a better way to handle", page.split("<h1>")[1].split("</h1>")[0])
++
++
++if __name__ == "__main__":
++    unittest.main()

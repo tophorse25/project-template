@@ -23,6 +23,16 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-11: Intern Task D — Customer-Readable Opportunity Briefs (ALL DECK TASKS COMPLETE)
+
+- Added `client_report.py` on branch `intern/task-d-client-report`: plain-language opportunity
+  briefs (verdict badge, why-real/why-noise, workarounds seen, willingness-to-pay, geography,
+  next step, evidence links) — jargon-free by test. Ported from the engine's html_report design.
+- Live at `/client-report` (+ nav link); `cli client-report` exports standalone shareable HTML;
+  sample committed: `reports/client-brief-dog-medication.html` (the validated requirement).
+- 5 new tests; full reference suite 37/37 green.
+- **Deck scoreboard complete: C, A, deploy, B (+ closed loop), E, D.**
+
 ## 2026-06-11: Intern Task E — Evaluation Metrics (speed / cost / relevance / validated rate)
 
 - Added `metrics.py` on branch `intern/task-e-metrics`: all four metric families computed from
