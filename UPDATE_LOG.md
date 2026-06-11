@@ -23,6 +23,16 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-11: Deployed the super_crawler Agent (always-on, this machine)
+
+- Deployed the agent with the Task A+C improvements as an always-on process: dashboard + runtime
+  loop on http://127.0.0.1:8400 (port 8000 is reserved by HTTP.sys here), 300 s cycles.
+- Added `serve --autostart` (branch `intern/deployment`) so the loop resumes after reboot without
+  a human clicking Start; `deploy/start_super_crawler.ps1` watchdog restarts on crash and guards
+  against double-starts; `deploy/register_startup.ps1` registers logon auto-start (user-run).
+- Verified live: `/api/runtime` running with completed cycle + research run; dashboard renders
+  "Deep Workers (real state)" with actual heartbeats. Docs: `docs/DEPLOYMENT.md`.
+
 ## 2026-06-02: Intern Task A — Real Worker State + Heartbeat Status Panel
 
 - Built on Task C, branch `intern/task-a-observability` of the super_crawler clone.

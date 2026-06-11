@@ -1,0 +1,44 @@
+diff --git a/super_crawler/cli.py b/super_crawler/cli.py
+index a444613..8e05164 100644
+--- a/super_crawler/cli.py
++++ b/super_crawler/cli.py
+@@ -64,6 +64,7 @@ def main() -> None:
+     serve.add_argument("--port", type=int, default=8000)
+     serve.add_argument("--input-dir", default="data/reddit_inbox", help="Dashboard Start button input directory")
+     serve.add_argument("--interval-seconds", type=int, default=60, help="Seconds between dashboard-controlled cycles")
++    serve.add_argument("--autostart", action="store_true", help="Start the runtime loop immediately (deployment mode)")
+ 
+     args = parser.parse_args()
+     storage = Storage(args.db)
+@@ -154,6 +155,7 @@ def main() -> None:
+                 port=args.port,
+                 input_dir=args.input_dir,
+                 interval_seconds=args.interval_seconds,
++                autostart=args.autostart,
+             )
+     finally:
+         if args.command != "serve":
+diff --git a/super_crawler/dashboard.py b/super_crawler/dashboard.py
+index 32437e8..3cff67f 100644
+--- a/super_crawler/dashboard.py
++++ b/super_crawler/dashboard.py
+@@ -17,6 +17,7 @@ def serve_dashboard(
+     port: int = 8000,
+     input_dir: str = "data/reddit_inbox",
+     interval_seconds: int = 60,
++    autostart: bool = False,
+ ) -> None:
+     db_path = storage.db_path
+     controller = RuntimeController(storage.db_path, input_dir=input_dir, interval_seconds=interval_seconds)
+@@ -27,6 +28,11 @@ def serve_dashboard(
+         app_controller = controller
+ 
+     server = ThreadingHTTPServer((host, port), Handler)
++    if autostart:
++        # Deployment mode: begin processing immediately so the agent survives
++        # reboots without a human clicking Start.
++        controller.start()
++        print("Runtime autostarted")
+     print(f"Dashboard listening on http://{host}:{port}")
+     try:
+         server.serve_forever()
