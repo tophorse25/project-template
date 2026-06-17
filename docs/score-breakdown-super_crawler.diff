@@ -1,0 +1,237 @@
+diff --git a/super_crawler/agents.py b/super_crawler/agents.py
+index a11eb17..aeebfa6 100644
+--- a/super_crawler/agents.py
++++ b/super_crawler/agents.py
+@@ -617,6 +617,22 @@ class ReportAgent(BaseAgent):
+         return "\n".join(lines) + "\n"
+ 
+ 
++# Single source of truth for the demand-score components: (key, human label, weight).
++# The dashboard reads this same list to display every component, so the weights it shows
++# can never drift from the weights the math actually uses. Weights sum to 1.0.
++SCORE_DIMENSIONS: list[tuple[str, str, float]] = [
++    ("frequency_score", "Frequency (amount of evidence)", 0.16),
++    ("pain_intensity_score", "Pain intensity", 0.16),
++    ("subreddit_spread_score", "Subreddit spread", 0.14),
++    ("velocity_score", "Velocity (keeps reappearing)", 0.12),
++    ("monetization_score", "Willingness to pay", 0.12),
++    ("engagement_score", "Engagement (upvotes + comments)", 0.10),
++    ("solution_gap_score", "Solution gap (alternatives / workarounds)", 0.08),
++    ("geo_confidence_score", "Geographic confidence", 0.06),
++    ("buildability_score", "Buildability", 0.06),
++]
++
++
+ def score_requirement(requirement: RequirementRecord, evidence: list[RawEvidence]) -> dict[str, Any]:
+     frequency = min(requirement.evidence_count * 12, 100)
+     velocity = min(requirement.times_detected * 15, 100)
+@@ -627,31 +643,23 @@ def score_requirement(requirement: RequirementRecord, evidence: list[RawEvidence
+     geo_confidence = min(sum(item["confidence"] for item in requirement.geo_distribution) * 100, 100)
+     solution_gap = min(sum(20 for item in evidence if {"alternative", "workaround"} & set(item.matched_patterns)), 100)
+     buildability = 70 if evidence else 0
+-    overall = round(
+-        frequency * 0.16
+-        + velocity * 0.12
+-        + spread * 0.14
+-        + pain * 0.16
+-        + engagement * 0.1
+-        + monetization * 0.12
+-        + geo_confidence * 0.06
+-        + solution_gap * 0.08
+-        + buildability * 0.06,
+-        1,
+-    )
+-    return {
+-        "frequency_score": round(frequency, 1),
+-        "velocity_score": round(velocity, 1),
+-        "subreddit_spread_score": round(spread, 1),
+-        "pain_intensity_score": round(pain, 1),
+-        "engagement_score": round(engagement, 1),
+-        "monetization_score": round(monetization, 1),
+-        "geo_confidence_score": round(geo_confidence, 1),
+-        "solution_gap_score": round(solution_gap, 1),
+-        "buildability_score": round(buildability, 1),
+-        "overall_score": overall,
+-        "overall_label": score_label(overall),
++
++    raw_values = {
++        "frequency_score": frequency,
++        "velocity_score": velocity,
++        "subreddit_spread_score": spread,
++        "pain_intensity_score": pain,
++        "engagement_score": engagement,
++        "monetization_score": monetization,
++        "geo_confidence_score": geo_confidence,
++        "solution_gap_score": solution_gap,
++        "buildability_score": buildability,
+     }
++    overall = round(sum(raw_values[key] * weight for key, _label, weight in SCORE_DIMENSIONS), 1)
++    result = {key: round(value, 1) for key, value in raw_values.items()}
++    result["overall_score"] = overall
++    result["overall_label"] = score_label(overall)
++    return result
+ 
+ 
+ def score_label(score: float) -> str:
+diff --git a/super_crawler/dashboard.py b/super_crawler/dashboard.py
+index 20c9ad4..f1e889c 100644
+--- a/super_crawler/dashboard.py
++++ b/super_crawler/dashboard.py
+@@ -6,6 +6,7 @@ from dataclasses import asdict
+ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+ from urllib.parse import parse_qs, urlparse
+ 
++from .agents import SCORE_DIMENSIONS
+ from .client_report import render_client_overview, render_client_page
+ from .metrics import compute_metrics
+ from .models import RequirementStatus, TaskGroupStatus, TaskGroupType
+@@ -411,6 +412,50 @@ def metrics_panel(storage: Storage) -> str:
+     )
+ 
+ 
++def _score_bar(value: float, width_px: int = 90) -> str:
++    pct = max(0.0, min(100.0, float(value)))
++    filled = int(pct / 100 * width_px)
++    return (
++        f"<span style='display:inline-block;vertical-align:middle;width:{width_px}px;height:8px;"
++        f"background:#e2e8f0;border-radius:4px;overflow:hidden'>"
++        f"<span style='display:block;width:{filled}px;height:8px;background:#3a7bd5'></span></span>"
++    )
++
++
++def score_breakdown(scores: dict, compact: bool = False) -> str:
++    """Show every demand-signal component, not just the blended overall.
++
++    The single number hides what's driving it; this lets a reviewer decide what matters.
++    """
++    if not scores:
++        return "<div class='summary muted'>No score yet.</div>"
++
++    if compact:
++        chips = "".join(
++            f"<div class='summary'>{html.escape(label.split(' (')[0])}: "
++            f"<strong>{scores.get(key, 0)}</strong> {_score_bar(scores.get(key, 0), 60)}</div>"
++            for key, label, _weight in SCORE_DIMENSIONS
++        )
++        return f"<div class='scorebreak'>{chips}</div>"
++
++    rows = "".join(
++        f"<tr><td>{html.escape(label)}</td>"
++        f"<td>{_score_bar(scores.get(key, 0))}</td>"
++        f"<td>{scores.get(key, 0)}</td>"
++        f"<td class='muted'>{int(weight * 100)}% &rarr; +{round(scores.get(key, 0) * weight, 1)}</td></tr>"
++        for key, label, weight in SCORE_DIMENSIONS
++    )
++    overall = scores.get("overall_score", 0)
++    label = scores.get("overall_label", "")
++    return (
++        f"<p class='muted'>Overall <strong>{overall}</strong> ({html.escape(str(label))}) is a weighted blend. "
++        "The components below show what's actually driving it — judge them directly.</p>"
++        "<table class='breakdown'><thead><tr><th>Signal</th><th>Strength (0&ndash;100)</th>"
++        "<th>Value</th><th>Weight &rarr; contribution</th></tr></thead>"
++        f"<tbody>{rows}</tbody></table>"
++    )
++
++
+ def deep_workers_panel(storage: Storage, stale_after_seconds: float = 300.0) -> str:
+     """Real worker state: stage, current requirement, heartbeat age.
+ 
+@@ -720,9 +765,10 @@ def requirement_lineage_row(storage: Storage, requirement: object) -> str:
+     <tr>
+       <td>
+         <a href="/requirement?id={html.escape(requirement.requirement_id)}"><strong>{html.escape(requirement.canonical_requirement)}</strong></a>
+-        <div class="summary"><span class="status{status_class}">{html.escape(requirement.status.value)}</span> Score {requirement.current_scores.get("overall_score", 0)}</div>
++        <div class="summary"><span class="status{status_class}">{html.escape(requirement.status.value)}</span> Overall {requirement.current_scores.get("overall_score", 0)}</div>
+         <div class="summary">{task_group_labels(storage, requirement)}</div>
+         <div class="summary">Evidence {requirement.evidence_count} | Subreddits {requirement.subreddit_count}</div>
++        {score_breakdown(requirement.current_scores, compact=True)}
+       </td>
+       <td>{search_agents}</td>
+       <td>{pool_agents}<div class="summary">Times detected {requirement.times_detected}</div></td>
+@@ -880,9 +926,10 @@ def requirement_card(requirement: object) -> str:
+     return f"""
+     <a class="item" href="/requirement?id={html.escape(requirement.requirement_id)}">
+       <div class="title">{html.escape(requirement.canonical_requirement)}</div>
+-      <div><span class="status{status_class}">{html.escape(requirement.status.value)}</span> Score {score}</div>
++      <div><span class="status{status_class}">{html.escape(requirement.status.value)}</span> Overall {score}</div>
+       <div class="summary">{html.escape(summary)}</div>
+       <div class="summary">Evidence {requirement.evidence_count} | Subreddits {requirement.subreddit_count} | Last seen {html.escape(requirement.last_seen)}</div>
++      {score_breakdown(requirement.current_scores, compact=True)}
+     </a>
+     """
+ 
+@@ -939,7 +986,9 @@ def detail_page(storage: Storage, requirement_id: str) -> str:
+         )
+     return f"""
+     <h1>{html.escape(requirement.canonical_requirement)}</h1>
+-    <p><span class="status">{requirement.status.value}</span> Score: {requirement.current_scores.get('overall_score', 0)}</p>
++    <p><span class="status">{requirement.status.value}</span></p>
++    <h2>Demand Signal Breakdown</h2>
++    {score_breakdown(requirement.current_scores)}
+     <div class="linkbar">
+       <a href="/agent-log?role=discovery">Requirement Search Agent Log</a>
+       <a href="/agent-log?role=deep_research">Deep Research Agent Log</a>
+diff --git a/tests/test_score_breakdown.py b/tests/test_score_breakdown.py
+new file mode 100644
+index 0000000..b322c13
+--- /dev/null
++++ b/tests/test_score_breakdown.py
+@@ -0,0 +1,58 @@
++"""Show-all-components scoring (mentor feedback): display every sub-score, not just the blend."""
++
++from __future__ import annotations
++
++import shutil
++import tempfile
++import unittest
++from pathlib import Path
++
++from super_crawler.agents import SCORE_DIMENSIONS, DiscoveryAgent, PoolManagerAgent, score_requirement
++from super_crawler.dashboard import score_breakdown
++from super_crawler.seed import SAMPLE_REDDIT_ITEMS
++from super_crawler.storage import Storage
++
++
++class ScoreBreakdownTests(unittest.TestCase):
++    def _storage(self) -> Storage:
++        directory = tempfile.mkdtemp()
++        self.addCleanup(shutil.rmtree, directory, True)
++        storage = Storage(Path(directory) / "test.sqlite3")
++        storage.migrate()
++        self.addCleanup(storage.close)
++        return storage
++
++    def test_weights_sum_to_one(self) -> None:
++        self.assertAlmostEqual(sum(weight for _key, _label, weight in SCORE_DIMENSIONS), 1.0, places=6)
++
++    def test_refactor_matches_explicit_weighted_sum(self) -> None:
++        storage = self._storage()
++        DiscoveryAgent(storage, "discovery").ingest_reddit_items(SAMPLE_REDDIT_ITEMS)
++        PoolManagerAgent(storage, "pool").reconcile_candidates()
++        for requirement in storage.list_requirements():
++            scores = score_requirement(requirement, storage.list_evidence(requirement.evidence_ids))
++            expected = round(sum(scores[key] * weight for key, _label, weight in SCORE_DIMENSIONS), 1)
++            # overall must equal the weighted blend of the displayed component values
++            self.assertAlmostEqual(scores["overall_score"], expected, places=1)
++
++    def test_full_breakdown_lists_every_component(self) -> None:
++        scores = {key: 50 for key, _l, _w in SCORE_DIMENSIONS}
++        scores.update({"overall_score": 50.0, "overall_label": "watch_signal"})
++        html = score_breakdown(scores)
++        for _key, label, _weight in SCORE_DIMENSIONS:
++            self.assertIn(label, html)
++        self.assertIn("contribution", html)
++
++    def test_compact_breakdown_shows_components(self) -> None:
++        scores = {key: 30 for key, _l, _w in SCORE_DIMENSIONS}
++        scores.update({"overall_score": 30.0, "overall_label": "weak_signal"})
++        html = score_breakdown(scores, compact=True)
++        self.assertIn("Pain intensity", html)
++        self.assertIn("Willingness to pay", html)
++
++    def test_empty_scores_render_safely(self) -> None:
++        self.assertIn("No score yet", score_breakdown({}))
++
++
++if __name__ == "__main__":
++    unittest.main()
