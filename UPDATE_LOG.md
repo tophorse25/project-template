@@ -23,6 +23,20 @@
 - Updated report generation to separate demand volume evidence, location coverage, and inventory stance.
 - Recorded `super_crawler` as a mentor reference pending repository access.
 
+## 2026-06-17: Audit-Driven Hardening (multi-agent audit + adversarial verification)
+
+- Ran a 3-agent improvement audit of the deployed super_crawler, fixed every substantive finding,
+  then a 5-agent adversarial verification pass re-checked the fixes (branch `intern/audit-fixes`).
+- Security: http(s)-only link gating (`urls.safe_url`) — no more javascript:/data: XSS on the
+  dashboard or shared client reports; 500 barrier; input 404s.
+- Correctness: velocity no longer self-inflates; real change-detection delta; outlier-resistant
+  engagement; informative buildability.
+- Recovery: verification caught (and we fixed) a double-claim regression — reaper now uses the
+  freshest heartbeat and the claim path detaches stale worker rows.
+- Production: migrate gated on user_version (verified live: deployed DB migrated 0→1); retention
+  pruning; per-file inbox parsing. LLM: retry, prompt-injection fence hardening, source validation.
+- 110 tests green (67 super_crawler + 43 engine). Docs: `docs/AUDIT_FIXES.md` + diff.
+
 ## 2026-06-11: Intern Task D — Customer-Readable Opportunity Briefs (ALL DECK TASKS COMPLETE)
 
 - Added `client_report.py` on branch `intern/task-d-client-report`: plain-language opportunity
